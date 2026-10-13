@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sort"
 	"sync"
 
 	"github.com/google/syzkaller/pkg/cover"
@@ -275,6 +276,93 @@ func (corpus *Corpus) ProgsPerArea() map[string]int {
 		ret[item.Name] = len(item.progs)
 	}
 	return ret
+}
+
+// FocusTier is one directed bucket and the seeds currently inside it.
+// A seed that hits several buckets appears in each of them.
+type FocusTier struct {
+	Class  string
+	Name   string
+	Weight float64
+	Seeds  []FocusSeed
+}
+
+// FocusSeed is one corpus program that intersects a focus tier.
+type FocusSeed struct {
+	Sig   string
+	Short string
+	Hits  int
+}
+
+func (corpus *Corpus) FocusTiers() []FocusTier {
+	corpus.mu.RLock()
+	defer corpus.mu.RUnlock()
+	tiers := make([]FocusTier, 0, len(corpus.focusAreas))
+	for _, area := range corpus.focusAreas {
+		if len(area.CoverPCs) == 0 {
+			continue
+		}
+		tier := FocusTier{
+			Class:  focusClass(area.Name),
+			Name:   area.Name,
+			Weight: area.Weight,
+		}
+		for _, item := range corpus.progsMap {
+			if _, ok := item.areas[area]; !ok {
+				continue
+			}
+			tier.Seeds = append(tier.Seeds, FocusSeed{
+				Sig:   item.Sig,
+				Short: item.Prog.String(),
+				Hits:  area.inAreaPCs(item.Cover),
+			})
+		}
+		sort.Slice(tier.Seeds, func(i, j int) bool {
+			if tier.Seeds[i].Hits != tier.Seeds[j].Hits {
+				return tier.Seeds[i].Hits > tier.Seeds[j].Hits
+			}
+			return tier.Seeds[i].Short < tier.Seeds[j].Short
+		})
+		tiers = append(tiers, tier)
+	}
+	sort.Slice(tiers, func(i, j int) bool {
+		ri, rj := focusClassRank(tiers[i].Class), focusClassRank(tiers[j].Class)
+		if ri != rj {
+			return ri < rj
+		}
+		return tiers[i].Name < tiers[j].Name
+	})
+	return tiers
+}
+
+func focusClass(name string) string {
+	switch name {
+	case "target":
+		return "A"
+	case "hop1":
+		return "B"
+	case "hop2":
+		return "C"
+	case "subsystem":
+		return "D"
+	default:
+		return ""
+	}
+}
+
+func focusClassRank(class string) int {
+	switch class {
+	case "A":
+		return 0
+	case "B":
+		return 1
+	case "C":
+		return 2
+	case "D":
+		return 3
+	default:
+		return 4
+	}
 }
 
 func (corpus *Corpus) Cover() []uint64 {

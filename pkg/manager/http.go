@@ -95,6 +95,7 @@ func (serv *HTTPServer) Serve(ctx context.Context) error {
 	handle("/file", serv.httpFile)
 	handle("/filecover", serv.httpFileCover)
 	handle("/filterpcs", serv.httpFilterPCs)
+	handle("/focus", serv.httpFocus)
 	handle("/funccover", serv.httpFuncCover)
 	handle("/input", serv.httpInput)
 	handle("/jobs", serv.httpJobs)
@@ -478,6 +479,20 @@ func (serv *HTTPServer) httpCrash(w http.ResponseWriter, r *http.Request) {
 		UICrashType:  makeUICrashType(info, serv.StartTime, nil),
 	}
 	executeTemplate(w, crashTemplate, data)
+}
+
+func (serv *HTTPServer) httpFocus(w http.ResponseWriter, r *http.Request) {
+	corpus := serv.Corpus.Load()
+	if corpus == nil {
+		http.Error(w, "the corpus information is not yet available", http.StatusInternalServerError)
+		return
+	}
+	data := UIFocusPage{
+		UIPageHeader: serv.pageHeader(r, "focus"),
+		RawCover:     serv.Cfg.RawCover,
+		Tiers:        corpus.FocusTiers(),
+	}
+	executeTemplate(w, focusTemplate, data)
 }
 
 func (serv *HTTPServer) httpCorpus(w http.ResponseWriter, r *http.Request) {
@@ -1222,6 +1237,12 @@ type UICorpusPage struct {
 	Inputs   []UIInput
 }
 
+type UIFocusPage struct {
+	UIPageHeader
+	RawCover bool
+	Tiers    []corpus.FocusTier
+}
+
 type UIInput struct {
 	Sig   string
 	Short string
@@ -1337,6 +1358,7 @@ var (
 	vmsTemplate           = createPage("vms", UIVMData{})
 	crashTemplate         = createPage("crash", UICrashPage{})
 	corpusTemplate        = createPage("corpus", UICorpusPage{})
+	focusTemplate         = createPage("focus", UIFocusPage{})
 	prioTemplate          = createPage("prio", UIPrioData{})
 	fallbackCoverTemplate = createPage("fallback_cover", UIFallbackCoverData{})
 	rawCoverTemplate      = createPage("raw_cover", UIRawCoverPage{})

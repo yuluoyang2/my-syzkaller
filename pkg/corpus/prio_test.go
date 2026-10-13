@@ -155,3 +155,35 @@ func TestFocusAreaInAreaWeighting(t *testing.T) {
 	corpus.Minimize(true)
 	verifySampling("after minimization")
 }
+
+func TestFocusTiers(t *testing.T) {
+	target := getTarget(t, targets.TestOS, targets.TestArch64)
+	rs := rand.NewSource(0)
+	corpus := NewFocusedCorpus(context.Background(), nil, []FocusArea{
+		{Name: "target", CoverPCs: map[uint64]struct{}{10: {}, 11: {}}, Weight: 16},
+		{Name: "hop1", CoverPCs: map[uint64]struct{}{20: {}}, Weight: 8},
+		{Name: "hop2", CoverPCs: map[uint64]struct{}{30: {}}, Weight: 4},
+		{Name: "subsystem", CoverPCs: map[uint64]struct{}{10: {}, 11: {}, 40: {}}, Weight: 2},
+		{Name: "rest", Weight: 1},
+	})
+
+	targetInp := generateRangedInput(target, rs, 1, 2)
+	targetInp.Cover = []uint64{10, 11}
+	hopInp := generateRangedInput(target, rs, 3, 4)
+	hopInp.Cover = []uint64{20}
+	corpus.Save(targetInp)
+	corpus.Save(hopInp)
+
+	tiers := corpus.FocusTiers()
+	assert.Equal(t, []string{"A", "B", "C", "D"}, []string{
+		tiers[0].Class, tiers[1].Class, tiers[2].Class, tiers[3].Class,
+	})
+	assert.Equal(t, "target", tiers[0].Name)
+	assert.Len(t, tiers[0].Seeds, 1)
+	assert.Equal(t, 2, tiers[0].Seeds[0].Hits)
+	assert.Equal(t, targetInp.Prog.String(), tiers[0].Seeds[0].Short)
+	assert.Len(t, tiers[1].Seeds, 1)
+	assert.Empty(t, tiers[2].Seeds)
+	assert.Len(t, tiers[3].Seeds, 1)
+	assert.Equal(t, 2, tiers[3].Seeds[0].Hits)
+}

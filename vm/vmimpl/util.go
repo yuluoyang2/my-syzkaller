@@ -6,6 +6,10 @@ package vmimpl
 import (
 	"errors"
 	"fmt"
+	"os/exec"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/syzkaller/pkg/log"
@@ -77,7 +81,47 @@ func SSHArgsForward(debug bool, sshKey string, port, forwardPort int, systemSSHC
 }
 
 func scpArgs(debug bool, sshKey string, port int, systemSSHCfg bool) []string {
-	return append(sshArgs(debug, sshKey, "-P", port, 0, systemSSHCfg), "-O") // Default to legacy scp protocol.
+	args := sshArgs(debug, sshKey, "-P", port, 0, systemSSHCfg)
+	// OpenSSH 9+ scp speaks SFTP unless -O selects the legacy protocol.
+	// OpenSSH 8.x rejects -O and already uses the legacy protocol.
+	if scpLegacyProtocol() {
+		args = append(args, "-O")
+	}
+	return args
+}
+
+var (
+	scpLegacyOnce sync.Once
+	scpUseLegacy  bool
+)
+
+func scpLegacyProtocol() bool {
+	scpLegacyOnce.Do(func() {
+		out, err := exec.Command("ssh", "-V").CombinedOutput()
+		if err != nil && len(out) == 0 {
+			return
+		}
+		scpUseLegacy = openSSHMajor(string(out)) >= 9
+	})
+	return scpUseLegacy
+}
+
+func openSSHMajor(version string) int {
+	const prefix = "OpenSSH_"
+	i := strings.Index(version, prefix)
+	if i < 0 {
+		return 0
+	}
+	rest := version[i+len(prefix):]
+	dot := strings.IndexByte(rest, '.')
+	if dot <= 0 {
+		return 0
+	}
+	major, err := strconv.Atoi(rest[:dot])
+	if err != nil {
+		return 0
+	}
+	return major
 }
 
 func sshArgs(debug bool, sshKey, portArg string, port, forwardPort int, systemSSHCfg bool) []string {

@@ -1,0 +1,35 @@
+{{/*
+Copyright 2026 syzkaller project authors. All rights reserved.
+Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
+*/}}
+
+{{range $tier := $.Tiers}}
+<table class="list_table">
+	<caption>{{if $tier.Class}}{{$tier.Class}}档内PC{{else}}{{$tier.Name}}{{end}}</caption>
+	<thead>
+	<tr>
+		<th>PC</th>
+		<th>程序</th>
+	</tr>
+	</thead>
+	<tbody>
+	{{range $seed := $tier.Seeds}}
+	<tr>
+		<td>
+			<a href='/cover?input={{$seed.Sig}}'>{{$seed.Hits}}</a>
+			{{if $.RawCover}}
+				/ <a href="/debuginput?sig={{$seed.Sig}}">[raw]</a>
+			{{end}}
+		</td>
+		<td><a href="/input?sig={{$seed.Sig}}">{{$seed.Short}}</a></td>
+	</tr>
+	{{else}}
+	<tr>
+		<td colspan="2">这一档还没有种子</td>
+	</tr>
+	{{end}}
+	</tbody>
+</table>
+{{else}}
+<p>没有配置分档。</p>
+{{end}}

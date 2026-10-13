@@ -30,3 +30,4 @@ executor/syscalls.h
 .gemini/
 gha-creds-*.json
 .agents/
+syz.log
