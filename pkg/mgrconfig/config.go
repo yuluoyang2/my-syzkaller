@@ -24,6 +24,7 @@ type Config struct {
 	// - <workdir>/crashes/*: crash output files
 	// - <workdir>/corpus.db: corpus with interesting programs
 	// - <workdir>/instance-x: per VM instance temporary files
+	// {{TIMESTAMP}} in this path expands to the local start time as YYYYMMDD_HHMMSS.nanoseconds.
 	Workdir string `json:"workdir"`
 	// Refers to a directory. Optional.
 	// Each VM will get a recursive copy of the files that are present in workdir_template.
@@ -233,6 +234,13 @@ type Config struct {
 
 	// MemoryDump enables feature to dump memory of the target VM on crash.
 	MemoryDump bool `json:"memory_dump"`
+
+	// IsDirect enables sequence-template generation and mutation.
+	// When false, both stay the stock syzkaller behavior.
+	IsDirect bool `json:"isDirect,omitempty"`
+	// DirectChains are optional cold-start syscall sequences, used only when IsDirect is set.
+	// Each inner list is one chain of syscall names, for example ["socket", "sendmsg"].
+	DirectChains [][]string `json:"directChains,omitempty"`
 
 	// Experimental options.
 	Experimental Experimental

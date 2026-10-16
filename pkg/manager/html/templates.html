@@ -1,0 +1,44 @@
+{{/*
+Copyright 2026 syzkaller project authors. All rights reserved.
+Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
+*/}}
+
+{{if not .Ready}}
+<p>Fuzzer 尚未初始化，模板列表暂时不可用。</p>
+{{else}}
+<p>
+	当前生效模板：{{len .Snapshot.Templates}}（冷启动 {{.Snapshot.Cold}}，已验证 {{.Snapshot.Verified}}）；
+	待验证候选：{{.Snapshot.Pending}}{{if .Snapshot.Verifying}}；正在验证 1 个候选{{end}}。
+</p>
+<p>此页显示当前内存中的模板，刷新页面可查看最新状态。</p>
+<table class="list_table">
+	<thead>
+	<tr>
+		<th>层级</th>
+		<th>来源</th>
+		<th>覆盖类型</th>
+		<th>命中调用</th>
+		<th>焦点 PC</th>
+		<th>调用数</th>
+		<th>调用序列</th>
+		<th>程序</th>
+	</tr>
+	</thead>
+	<tbody>
+	{{range .Snapshot.Templates}}
+	<tr>
+		<td>{{.Tier}}</td>
+		<td>{{if .Cold}}冷启动{{else}}已验证{{end}}</td>
+		<td>{{.Kind}}</td>
+		<td>{{.HitCall}}</td>
+		<td>{{.CoverPCs}}</td>
+		<td>{{.Calls}}</td>
+		<td>{{.Sequence}}</td>
+		<td><a href="/templates?id={{.ID}}">查看程序</a></td>
+	</tr>
+	{{else}}
+	<tr><td colspan="8">当前没有生效模板。</td></tr>
+	{{end}}
+	</tbody>
+</table>
+{{end}}

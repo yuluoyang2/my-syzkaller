@@ -160,10 +160,11 @@ func TestFocusTiers(t *testing.T) {
 	target := getTarget(t, targets.TestOS, targets.TestArch64)
 	rs := rand.NewSource(0)
 	corpus := NewFocusedCorpus(context.Background(), nil, []FocusArea{
-		{Name: "target", CoverPCs: map[uint64]struct{}{10: {}, 11: {}}, Weight: 16},
-		{Name: "hop1", CoverPCs: map[uint64]struct{}{20: {}}, Weight: 8},
-		{Name: "hop2", CoverPCs: map[uint64]struct{}{30: {}}, Weight: 4},
-		{Name: "subsystem", CoverPCs: map[uint64]struct{}{10: {}, 11: {}, 40: {}}, Weight: 2},
+		{Name: "A", CoverPCs: map[uint64]struct{}{10: {}, 11: {}}, Weight: 16},
+		{Name: "B", CoverPCs: map[uint64]struct{}{20: {}}, Weight: 8},
+		{Name: "C", CoverPCs: map[uint64]struct{}{30: {}}, Weight: 4},
+		{Name: "D", CoverPCs: map[uint64]struct{}{10: {}, 11: {}, 40: {}}, Weight: 2},
+		{Name: "target", CoverPCs: map[uint64]struct{}{50: {}}, Weight: 16},
 		{Name: "rest", Weight: 1},
 	})
 
@@ -175,10 +176,11 @@ func TestFocusTiers(t *testing.T) {
 	corpus.Save(hopInp)
 
 	tiers := corpus.FocusTiers()
+	assert.Len(t, tiers, 4)
 	assert.Equal(t, []string{"A", "B", "C", "D"}, []string{
 		tiers[0].Class, tiers[1].Class, tiers[2].Class, tiers[3].Class,
 	})
-	assert.Equal(t, "target", tiers[0].Name)
+	assert.Equal(t, "A", tiers[0].Name)
 	assert.Len(t, tiers[0].Seeds, 1)
 	assert.Equal(t, 2, tiers[0].Seeds[0].Hits)
 	assert.Equal(t, targetInp.Prog.String(), tiers[0].Seeds[0].Short)
@@ -186,4 +188,30 @@ func TestFocusTiers(t *testing.T) {
 	assert.Empty(t, tiers[2].Seeds)
 	assert.Len(t, tiers[3].Seeds, 1)
 	assert.Equal(t, 2, tiers[3].Seeds[0].Hits)
+}
+
+func TestFocusClassNames(t *testing.T) {
+	for _, class := range []string{"A", "B", "C", "D"} {
+		assert.Equal(t, class, focusClass(class))
+	}
+	for _, unsupported := range []string{"target", "hop1", "hop2", "subsystem", "rest", "a"} {
+		assert.Empty(t, focusClass(unsupported))
+	}
+}
+
+func TestBestFocus(t *testing.T) {
+	corpus := NewFocusedCorpus(context.Background(), nil, []FocusArea{
+		{Name: "A", CoverPCs: map[uint64]struct{}{10: {}, 11: {}}, Weight: 16},
+		{Name: "B", CoverPCs: map[uint64]struct{}{20: {}}, Weight: 8},
+		{Name: "D", CoverPCs: map[uint64]struct{}{10: {}, 11: {}, 40: {}}, Weight: 2},
+	})
+	class, pcs := corpus.BestFocus([]uint64{10, 11, 40})
+	assert.Equal(t, "A", class)
+	assert.ElementsMatch(t, []uint64{10, 11}, pcs)
+	class, pcs = corpus.BestFocus([]uint64{20})
+	assert.Equal(t, "B", class)
+	assert.Equal(t, []uint64{20}, pcs)
+	class, pcs = corpus.BestFocus([]uint64{99})
+	assert.Empty(t, class)
+	assert.Empty(t, pcs)
 }

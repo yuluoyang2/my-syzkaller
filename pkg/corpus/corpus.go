@@ -302,8 +302,12 @@ func (corpus *Corpus) FocusTiers() []FocusTier {
 		if len(area.CoverPCs) == 0 {
 			continue
 		}
+		class := focusClass(area.Name)
+		if class == "" {
+			continue
+		}
 		tier := FocusTier{
-			Class:  focusClass(area.Name),
+			Class:  class,
 			Name:   area.Name,
 			Weight: area.Weight,
 		}
@@ -337,14 +341,8 @@ func (corpus *Corpus) FocusTiers() []FocusTier {
 
 func focusClass(name string) string {
 	switch name {
-	case "target":
-		return "A"
-	case "hop1":
-		return "B"
-	case "hop2":
-		return "C"
-	case "subsystem":
-		return "D"
+	case "A", "B", "C", "D":
+		return name
 	default:
 		return ""
 	}
@@ -363,6 +361,34 @@ func focusClassRank(class string) int {
 	default:
 		return 4
 	}
+}
+
+// BestFocus returns the highest focus class hit by cover and the PCs in that class.
+// Classes are A (target), B (hop1), C (hop2), D (subsystem). An empty class means no hit.
+func (corpus *Corpus) BestFocus(cover []uint64) (class string, pcs []uint64) {
+	corpus.mu.RLock()
+	defer corpus.mu.RUnlock()
+	bestRank := focusClassRank("")
+	for _, area := range corpus.focusAreas {
+		areaClass := focusClass(area.Name)
+		if len(area.CoverPCs) == 0 || areaClass == "" {
+			continue
+		}
+		rank := focusClassRank(areaClass)
+		if rank >= bestRank {
+			continue
+		}
+		var got []uint64
+		for _, pc := range cover {
+			if _, ok := area.CoverPCs[pc]; ok {
+				got = append(got, pc)
+			}
+		}
+		if len(got) != 0 {
+			class, pcs, bestRank = areaClass, got, rank
+		}
+	}
+	return class, pcs
 }
 
 func (corpus *Corpus) Cover() []uint64 {

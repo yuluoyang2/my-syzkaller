@@ -4,6 +4,8 @@
 package mgrconfig
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/google/syzkaller/prog"
@@ -11,6 +13,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestWorkdirTimestamp(t *testing.T) {
+	data, err := os.ReadFile("testdata/qemu.cfg")
+	require.NoError(t, err)
+	data = []byte(strings.Replace(string(data), "/syzkaller/workdir",
+		"/syzkaller/workdir_{{TIMESTAMP}}", 1))
+
+	cfg, err := LoadData(data)
+	require.NoError(t, err)
+	require.Regexp(t, `^/syzkaller/workdir_\d{8}_\d{6}\.\d{9}$`, cfg.Workdir)
+}
 
 func TestParseEnabledSyscalls(t *testing.T) {
 	target, err := prog.GetTarget(targets.TestOS, targets.TestArch64)

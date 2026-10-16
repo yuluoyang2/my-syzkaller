@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/google/syzkaller/pkg/config"
 	"github.com/google/syzkaller/pkg/osutil"
@@ -152,6 +153,9 @@ func Complete(cfg *Config) error {
 	); err != nil {
 		return err
 	}
+	// Resolve once so every use of the workdir in this manager run sees the same path.
+	cfg.Workdir = strings.ReplaceAll(cfg.Workdir, "{{TIMESTAMP}}",
+		time.Now().Format("20060102_150405.000000000"))
 	cfg.Workdir = osutil.Abs(cfg.Workdir)
 	if cfg.WorkdirTemplate != "" {
 		cfg.WorkdirTemplate = osutil.Abs(cfg.WorkdirTemplate)

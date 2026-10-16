@@ -109,6 +109,7 @@ func (serv *HTTPServer) Serve(ctx context.Context) error {
 	handle("/stats", serv.httpStats)
 	handle("/subsystemcover", serv.httpSubsystemCover)
 	handle("/syscalls", serv.httpSyscalls)
+	handle("/templates", serv.httpTemplates)
 	handle("/vm", serv.httpVM)
 	handle("/vms", serv.httpVMs)
 	// keep-sorted end
@@ -1089,6 +1090,7 @@ func (serv *HTTPServer) httpJobs(w http.ResponseWriter, r *http.Request) {
 	case fuzzer.JobCandidateTriage:
 	case fuzzer.JobSmash:
 	case fuzzer.JobHints:
+	case fuzzer.JobTemplate:
 	default:
 		http.Error(w, "unknown job type", http.StatusBadRequest)
 		return
@@ -1109,6 +1111,35 @@ func (serv *HTTPServer) httpJobs(w http.ResponseWriter, r *http.Request) {
 		return a.Short < b.Short
 	})
 	executeTemplate(w, jobListTemplate, data)
+}
+
+func (serv *HTTPServer) httpTemplates(w http.ResponseWriter, r *http.Request) {
+	if !serv.Cfg.IsDirect {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	fuzzerObj := serv.Fuzzer.Load()
+	if id := r.FormValue("id"); id != "" {
+		if fuzzerObj == nil {
+			http.Error(w, "fuzzer is not ready", http.StatusServiceUnavailable)
+			return
+		}
+		program, ok := fuzzerObj.DirectTemplateProgram(id)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write(program)
+		return
+	}
+	data := UITemplatePage{UIPageHeader: serv.pageHeader(r, "sequence templates")}
+	if fuzzerObj != nil {
+		data.Ready = true
+		data.Snapshot = fuzzerObj.DirectTemplates()
+	}
+	executeTemplate(w, templatesTemplate, data)
 }
 
 func reproStatus(hasRepro, hasCRepro, reproducing, nonReproducible bool) string {
@@ -1261,6 +1292,7 @@ type UIPageHeader struct {
 	GitRevisionLink string
 	ExpertMode      bool
 	Paused          bool
+	ShowTemplates   bool
 }
 
 func (serv *HTTPServer) pageHeader(r *http.Request, title string) UIPageHeader {
@@ -1282,6 +1314,7 @@ func (serv *HTTPServer) pageHeader(r *http.Request, title string) UIPageHeader {
 		GitRevisionLink: revisionLink,
 		ExpertMode:      serv.expertMode,
 		Paused:          serv.paused,
+		ShowTemplates:   serv.Cfg.IsDirect,
 	}
 }
 
@@ -1346,6 +1379,12 @@ type UIJobInfo struct {
 	Execs int32
 }
 
+type UITemplatePage struct {
+	UIPageHeader
+	Ready    bool
+	Snapshot fuzzer.DirectTemplateSnapshot
+}
+
 type UITextPage struct {
 	UIPageHeader
 	Text []byte
@@ -1363,6 +1402,7 @@ var (
 	fallbackCoverTemplate = createPage("fallback_cover", UIFallbackCoverData{})
 	rawCoverTemplate      = createPage("raw_cover", UIRawCoverPage{})
 	jobListTemplate       = createPage("job_list", UIJobList{})
+	templatesTemplate     = createPage("templates", UITemplatePage{})
 	textTemplate          = createPage("text", UITextPage{})
 )
 

@@ -27,6 +27,7 @@ const (
 	JobCandidateTriage JobType = "candidate_triage"
 	JobSmash           JobType = "smash"
 	JobHints           JobType = "hints"
+	JobTemplate        JobType = "template"
 )
 
 type job interface {
@@ -67,11 +68,12 @@ func mutateProgRequest(fuzzer *Fuzzer, rnd *rand.Rand) *queue.Request {
 		return nil
 	}
 	newP := p.Clone()
-	newP.Mutate(rnd,
+	newP.MutateWithOpts(rnd,
 		prog.RecommendedCalls,
 		fuzzer.ChoiceTable(),
 		fuzzer.Config.NoMutateCalls,
 		fuzzer.Config.Corpus.Programs(),
+		fuzzer.mutateOptsFor(newP),
 	)
 	return &queue.Request{
 		Prog:     newP,
@@ -173,6 +175,13 @@ func (job *triageJob) handleCall(call int, info *triageCall) {
 		return
 	}
 
+	if job.p != nil && call >= -1 && call < len(job.p.Calls) {
+		job.fuzzer.offerDirectCandidate(corpus.NewInput{
+			Prog:  job.p,
+			Call:  call,
+			Cover: info.cover.Serialize(),
+		})
+	}
 	p := job.p
 	if job.flags&ProgMinimized == 0 {
 		p, call = job.minimize(call, info)

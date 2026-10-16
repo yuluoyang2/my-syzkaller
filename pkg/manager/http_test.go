@@ -6,8 +6,12 @@ package manager
 import (
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/testutil"
 )
 
@@ -19,6 +23,22 @@ func TestHttpTemplates(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestHttpDirectTemplatesBeforeFuzzer(t *testing.T) {
+	serv := &HTTPServer{Cfg: &mgrconfig.Config{IsDirect: true}}
+	w := httptest.NewRecorder()
+	serv.httpTemplates(w, httptest.NewRequest(http.MethodGet, "/templates", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Fuzzer 尚未初始化") {
+		t.Fatalf("unexpected templates response: status=%d body=%q", w.Code, w.Body.String())
+	}
+
+	serv.Cfg.IsDirect = false
+	w = httptest.NewRecorder()
+	serv.httpTemplates(w, httptest.NewRequest(http.MethodGet, "/templates", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("non-direct templates status=%d, want %d", w.Code, http.StatusNotFound)
 	}
 }
 

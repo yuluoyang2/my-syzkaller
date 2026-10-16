@@ -211,3 +211,15 @@ dup(r2)
 		}
 	}
 }
+
+func TestDupCallCollideRejectsOversizedPrograms(t *testing.T) {
+	target := InitTargetTest(t, "test", "64")
+	ct := target.BuildChoiceTable(nil, nil)
+	r := rand.New(rand.NewSource(1))
+	for _, calls := range []int{MaxCalls, MaxCalls + 1} {
+		p := target.Generate(rand.NewSource(1), calls, ct)
+		if _, err := DupCallCollide(p, r); err == nil {
+			t.Fatalf("expected a %d-call program to be rejected", calls)
+		}
+	}
+}

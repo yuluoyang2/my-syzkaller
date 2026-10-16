@@ -109,7 +109,7 @@ func DupCallCollide(origProg *Prog, rand *rand.Rand) (*Prog, error) {
 	insert := max(len(origProg.Calls)/3, 1)
 	insert = min(insert, maxAsyncPerProg)
 	insert = min(insert, MaxCalls-len(origProg.Calls))
-	if insert == 0 {
+	if insert <= 0 {
 		return nil, fmt.Errorf("no calls could be duplicated")
 	}
 	duplicate := map[int]bool{}

@@ -50,6 +50,11 @@ Use of this source code is governed by Apache 2 LICENSE that can be found in the
 			<div class="navigation_tab{{if eq .URLPath "/focus"}}_selected{{end}}">
 				<a href='/focus'>🎯 focus</a>
 			</div>
+			{{if .ShowTemplates}}
+			<div class="navigation_tab{{if eq .URLPath "/templates"}}_selected{{end}}">
+				<a href='/templates'>🧩 templates</a>
+			</div>
+			{{end}}
 			<div class="navigation_tab{{if eq .URLPath "/vms"}}_selected{{end}}">
 				<a href='/vms'>💻 VMs</a>
 			</div>

@@ -48,6 +48,11 @@ type MutateOpts struct {
 	InsertWeight       int
 	MutateArgWeight    int
 	RemoveCallWeight   int
+	// PrefixLen > 0 biases argument mutation toward the first PrefixLen calls,
+	// and PreferCall (an index inside that prefix) most of all.
+	// Zero PrefixLen keeps the stock complexity-weighted choice.
+	PrefixLen  int
+	PreferCall int
 }
 
 func (o MutateOpts) weight() int {
@@ -227,7 +232,7 @@ func (ctx *mutator) mutateArg() bool {
 		return false
 	}
 
-	idx := chooseCall(p, r)
+	idx := chooseCall(p, r, ctx.opts)
 	if idx < 0 {
 		return false
 	}
@@ -277,7 +282,22 @@ func (ctx *mutator) mutateArg() bool {
 }
 
 // Select a call based on the complexity of the arguments.
-func chooseCall(p *Prog, r *randGen) int {
+func chooseCall(p *Prog, r *randGen, opts MutateOpts) int {
+	if opts.PrefixLen > 0 && len(p.Calls) > 0 {
+		n := min(opts.PrefixLen, len(p.Calls))
+		// PreferCall < 0 marks an Extra template: no call owns the coverage,
+		// so argument mutation stays inside the template and picks uniformly.
+		if opts.PreferCall < 0 {
+			return r.Intn(n)
+		}
+		roll := r.Intn(10)
+		if roll < 7 && opts.PreferCall < len(p.Calls) {
+			return opts.PreferCall
+		}
+		if roll < 9 {
+			return r.Intn(n)
+		}
+	}
 	var prioSum float64
 	var callPriorities []float64
 	for _, c := range p.Calls {
@@ -294,6 +314,33 @@ func chooseCall(p *Prog, r *randGen) int {
 		return -1 // All calls are without arguments.
 	}
 	return sort.SearchFloat64s(callPriorities, prioSum*r.Float64())
+}
+
+// MutateCallArg mutates arguments of one call a bounded number of times.
+// It does not splice, insert, or delete calls.
+func (p *Prog) MutateCallArg(rs rand.Source, call int, ct *ChoiceTable, tries int) {
+	if call < 0 || call >= len(p.Calls) || tries <= 0 {
+		return
+	}
+	r := newRand(p.Target, rs)
+	ctx := &mutator{
+		p:      p,
+		r:      r,
+		ncalls: max(len(p.Calls), RecommendedCalls),
+		ct:     ct,
+		opts: MutateOpts{
+			MutateArgCount: 1,
+			PreferCall:     call,
+			PrefixLen:      len(p.Calls),
+		},
+	}
+	for range tries {
+		if !ctx.mutateArg() {
+			break
+		}
+	}
+	p.sanitizeFix()
+	p.debugValidate()
 }
 
 func (target *Target) mutateArg(r *randGen, s *state, arg Arg, ctx ArgCtx, updateSizes *bool) ([]*Call, bool) {

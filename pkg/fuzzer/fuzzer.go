@@ -42,6 +42,9 @@ type Fuzzer struct {
 	ctRegenerate chan struct{}
 
 	execQueues
+
+	// templates is used only when Config.IsDirect is set.
+	templates *directPool
 }
 
 func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
@@ -67,6 +70,17 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 	}
 	f.execQueues = newExecQueues(f)
 	f.updateChoiceTable(nil)
+	if cfg.IsDirect {
+		f.templates = newDirectPool()
+		added, errs := f.templates.addCold(target, cfg.DirectChains, f.ChoiceTable(), rnd)
+		for _, err := range errs {
+			f.Logf(0, "direct: %s", err)
+		}
+		f.Logf(0, "direct: sequence templates enabled (%d cold-start chains)", added)
+		if n := f.templates.sync(cfg.Corpus); n > 0 {
+			f.Logf(0, "direct: %d corpus programs queued for template verification", n)
+		}
+	}
 	go f.choiceTableUpdater()
 	if cfg.Debug {
 		go f.logCurrentStats()
@@ -226,6 +240,10 @@ type Config struct {
 	NewInputFilter func(call string) bool
 	PatchTest      bool
 	ModeKFuzzTest  bool
+	// IsDirect turns on sequence-template generation and mutation.
+	// When false, genFuzz keeps the stock 95/5 mutate/generate split.
+	IsDirect     bool
+	DirectChains [][]string
 }
 
 func (fuzzer *Fuzzer) triageProgCall(p *prog.Prog, info *flatrpc.CallInfo, call int, triage *map[int]*triageCall) {
@@ -290,13 +308,19 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 		// more frequently because fallback signal is weak.
 		mutateRate = 0.5
 	}
+	if fuzzer.Config.IsDirect {
+		fuzzer.refreshDirect()
+	}
 	var req *queue.Request
 	rnd := fuzzer.rand()
 	if rnd.Float64() < mutateRate {
 		req = mutateProgRequest(fuzzer, rnd)
 	}
 	if req == nil {
-		req = genProgRequest(fuzzer, rnd)
+		req = genDirectProgRequest(fuzzer, rnd)
+		if req == nil {
+			req = genProgRequest(fuzzer, rnd)
+		}
 	}
 	if fuzzer.Config.Collide && rnd.Intn(3) == 0 {
 		req = &queue.Request{

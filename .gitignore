@@ -31,3 +31,4 @@ executor/syscalls.h
 gha-creds-*.json
 .agents/
 syz.log
+normal.log
