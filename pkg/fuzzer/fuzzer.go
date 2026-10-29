@@ -76,9 +76,13 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 		for _, err := range errs {
 			f.Logf(0, "direct: %s", err)
 		}
-		f.Logf(0, "direct: sequence templates enabled (%d cold-start chains)", added)
-		if n := f.templates.sync(cfg.Corpus); n > 0 {
-			f.Logf(0, "direct: %d corpus programs queued for template verification", n)
+		if cfg.DisableDynamicTemplates {
+			f.Logf(0, "direct: %d cold-start chains, dynamic template discovery disabled", added)
+		} else {
+			f.Logf(0, "direct: sequence templates enabled (%d cold-start chains)", added)
+			if n := f.templates.sync(cfg.Corpus); n > 0 {
+				f.Logf(0, "direct: %d corpus programs queued for template verification", n)
+			}
 		}
 	}
 	go f.choiceTableUpdater()
@@ -242,8 +246,9 @@ type Config struct {
 	ModeKFuzzTest  bool
 	// IsDirect turns on sequence-template generation and mutation.
 	// When false, genFuzz keeps the stock 95/5 mutate/generate split.
-	IsDirect     bool
-	DirectChains [][]string
+	IsDirect                bool
+	DisableDynamicTemplates bool
+	DirectChains            [][]string
 }
 
 func (fuzzer *Fuzzer) triageProgCall(p *prog.Prog, info *flatrpc.CallInfo, call int, triage *map[int]*triageCall) {

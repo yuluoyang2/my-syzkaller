@@ -389,7 +389,7 @@ func (fuzzer *Fuzzer) mutateOptsFor(p *prog.Prog) prog.MutateOpts {
 }
 
 func (fuzzer *Fuzzer) refreshDirect() {
-	if fuzzer.templates == nil || !fuzzer.Config.Coverage {
+	if fuzzer.templates == nil || !fuzzer.Config.Coverage || fuzzer.Config.DisableDynamicTemplates {
 		return
 	}
 	if job := fuzzer.templates.takeDirectJob(); job != nil {
@@ -398,7 +398,8 @@ func (fuzzer *Fuzzer) refreshDirect() {
 }
 
 func (fuzzer *Fuzzer) offerDirectCandidate(input corpus.NewInput) {
-	if !fuzzer.Config.IsDirect || fuzzer.templates == nil || fuzzer.Config.Corpus == nil {
+	if !fuzzer.Config.IsDirect || fuzzer.Config.DisableDynamicTemplates ||
+		fuzzer.templates == nil || fuzzer.Config.Corpus == nil {
 		return
 	}
 	fuzzer.templates.offer(fuzzer.Config.Corpus, input)

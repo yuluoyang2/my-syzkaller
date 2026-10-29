@@ -433,6 +433,43 @@ func TestDirectSyncHighestTier(t *testing.T) {
 	}
 }
 
+func TestDisableDynamicTemplatesKeepsColdChains(t *testing.T) {
+	target, err := prog.GetTarget("test", "64")
+	require.NoError(t, err)
+	seed, err := target.GenerateSequence(rand.NewSource(1), target.BuildChoiceTable(nil, nil),
+		[]string{"test$int"})
+	require.NoError(t, err)
+	for _, disable := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disabled=%t", disable), func(t *testing.T) {
+			c := corpus.NewFocusedCorpus(t.Context(), nil, []corpus.FocusArea{
+				{Name: "A", CoverPCs: map[uint64]struct{}{10: {}}, Weight: 1},
+			})
+			c.Save(corpus.NewInput{Prog: seed, Call: 0, Cover: []uint64{10}})
+			fuzzer := NewFuzzer(t.Context(), &Config{
+				Corpus: c, Coverage: true, IsDirect: true,
+				DisableDynamicTemplates: disable,
+				DirectChains:            [][]string{{"test$int"}},
+				EnabledCalls: map[*prog.Syscall]bool{
+					target.SyscallMap["test$int"]: true,
+				},
+			}, rand.New(rand.NewSource(2)), target)
+			snapshot := fuzzer.DirectTemplates()
+			assert.Equal(t, 1, snapshot.Cold)
+			if !disable {
+				assert.Equal(t, 1, snapshot.Pending)
+				return
+			}
+			assert.Zero(t, snapshot.Pending)
+			assert.NotNil(t, genDirectProgRequest(fuzzer, rand.New(rand.NewSource(3))))
+			fuzzer.offerDirectCandidate(corpus.NewInput{Prog: seed, Call: 0, Cover: []uint64{10}})
+			fuzzer.refreshDirect()
+			snapshot = fuzzer.DirectTemplates()
+			assert.Zero(t, snapshot.Pending)
+			assert.False(t, snapshot.Verifying)
+		})
+	}
+}
+
 func TestClassifyStableUsesReproducedTier(t *testing.T) {
 	c := corpus.NewFocusedCorpus(context.Background(), nil, []corpus.FocusArea{
 		{Name: "A", CoverPCs: map[uint64]struct{}{10: {}}, Weight: 16},

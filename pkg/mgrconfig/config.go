@@ -238,6 +238,9 @@ type Config struct {
 	// IsDirect enables sequence-template generation and mutation.
 	// When false, both stay the stock syzkaller behavior.
 	IsDirect bool `json:"isDirect,omitempty"`
+	// DisableDynamicTemplates keeps the directChains cold-start templates but skips
+	// corpus-based template discovery and verification. The default is false.
+	DisableDynamicTemplates bool `json:"disableDynamicTemplates,omitempty"`
 	// DirectChains are optional cold-start syscall sequences, used only when IsDirect is set.
 	// Each inner list is one chain of syscall names, for example ["socket", "sendmsg"].
 	DirectChains [][]string `json:"directChains,omitempty"`
