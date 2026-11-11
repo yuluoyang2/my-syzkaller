@@ -53,6 +53,9 @@ type MutateOpts struct {
 	// Zero PrefixLen keeps the stock complexity-weighted choice.
 	PrefixLen  int
 	PreferCall int
+	// SkipResourceArgs drops resource (fd and similar) arguments from argument
+	// mutation, so that the effort goes into the data arguments instead.
+	SkipResourceArgs bool
 }
 
 func (o MutateOpts) weight() int {
@@ -250,7 +253,11 @@ func (ctx *mutator) mutateArg() bool {
 	updateSizes := true
 	for stop, ok := false, false; !stop; stop = ok && r.oneOf(ctx.opts.MutateArgCount) {
 		ok = true
-		ma := &mutationArgs{target: p.Target, ignoreLengths: c.Meta.Attrs.KFuzzTest}
+		ma := &mutationArgs{
+			target:          p.Target,
+			ignoreLengths:   c.Meta.Attrs.KFuzzTest,
+			ignoreResources: ctx.opts.SkipResourceArgs,
+		}
 		ForeachArg(c, ma.collectArg)
 		if len(ma.args) == 0 {
 			return false
@@ -319,8 +326,19 @@ func chooseCall(p *Prog, r *randGen, opts MutateOpts) int {
 // MutateCallArg mutates arguments of one call a bounded number of times.
 // It does not splice, insert, or delete calls.
 func (p *Prog) MutateCallArg(rs rand.Source, call int, ct *ChoiceTable, tries int) {
+	p.MutateCallArgOpts(rs, call, ct, tries, MutateOpts{})
+}
+
+// MutateCallArgOpts is MutateCallArg with extra control over the mutation.
+// Only SkipResourceArgs and MutateArgCount are honored; the call selection is
+// fixed by the call argument.
+func (p *Prog) MutateCallArgOpts(rs rand.Source, call int, ct *ChoiceTable, tries int, opts MutateOpts) {
 	if call < 0 || call >= len(p.Calls) || tries <= 0 {
 		return
+	}
+	argCount := opts.MutateArgCount
+	if argCount <= 0 {
+		argCount = 1
 	}
 	r := newRand(p.Target, rs)
 	ctx := &mutator{
@@ -329,9 +347,10 @@ func (p *Prog) MutateCallArg(rs rand.Source, call int, ct *ChoiceTable, tries in
 		ncalls: max(len(p.Calls), RecommendedCalls),
 		ct:     ct,
 		opts: MutateOpts{
-			MutateArgCount: 1,
-			PreferCall:     call,
-			PrefixLen:      len(p.Calls),
+			MutateArgCount:   argCount,
+			PreferCall:       call,
+			PrefixLen:        len(p.Calls),
+			SkipResourceArgs: opts.SkipResourceArgs,
 		},
 	}
 	for range tries {
@@ -625,12 +644,13 @@ func (t *ConstType) mutate(r *randGen, s *state, arg Arg, ctx ArgCtx) (calls []*
 }
 
 type mutationArgs struct {
-	target        *Target
-	ignoreSpecial bool
-	ignoreLengths bool
-	prioSum       float64
-	args          []mutationArg
-	argsBuffer    [16]mutationArg
+	target          *Target
+	ignoreSpecial   bool
+	ignoreLengths   bool
+	ignoreResources bool
+	prioSum         float64
+	args            []mutationArg
+	argsBuffer      [16]mutationArg
 }
 
 type mutationArg struct {
@@ -655,6 +675,11 @@ func (ma *mutationArgs) collectArg(arg Arg, ctx *ArgCtx) {
 
 	if prio == dontMutate {
 		return
+	}
+	if ma.ignoreResources {
+		if _, ok := typ.(*ResourceType); ok {
+			return
+		}
 	}
 
 	_, isArrayTyp := typ.(*ArrayType)

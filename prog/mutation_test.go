@@ -167,6 +167,38 @@ func TestMutateArgument(t *testing.T) {
 	}
 }
 
+func TestMutateCallArgSkipResourceArgs(t *testing.T) {
+	rs, ct, p, _, err := buildTestContext([2]string{
+		`r0 = test$res0()
+test$res1(r0)`,
+		`r0 = test$res0()
+test$res1(r0)`,
+	}, initTargetTest(t, "test", "64"))
+	require.NoError(t, err)
+
+	// test$res1 only takes a resource, so with resource arguments excluded
+	// there is nothing left to mutate and the program must not change.
+	want := p.Serialize()
+	for i := range 200 {
+		p1 := p.Clone()
+		p1.MutateCallArgOpts(rs, 1, ct, 2, MutateOpts{SkipResourceArgs: true})
+		assert.Equal(t, string(want), string(p1.Serialize()), "iteration %v", i)
+	}
+
+	// Sanity check: the same mutation does change the program when resource
+	// arguments are not excluded.
+	changed := false
+	for range 200 {
+		p1 := p.Clone()
+		p1.MutateCallArg(rs, 1, ct, 2)
+		if !bytes.Equal(want, p1.Serialize()) {
+			changed = true
+			break
+		}
+	}
+	assert.True(t, changed, "resource argument mutation never changed the program")
+}
+
 func TestMutateNoSquash(t *testing.T) {
 	target := initTargetTest(t, "test", "64")
 	p, err := target.Deserialize([]byte(`mutate_no_squash(&(0x7f0000000000)={0x1, 0x2, 0x3, 0x4, "5e9ce23b"})`), Strict)

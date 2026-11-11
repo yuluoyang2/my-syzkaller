@@ -36,3 +36,6 @@ gha-creds-*.json
 rm-verify
 qemu.sh
 ssh.sh
+
+target.json
+./GEMINI.md
