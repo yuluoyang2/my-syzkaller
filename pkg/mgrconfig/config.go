@@ -235,21 +235,47 @@ type Config struct {
 	// MemoryDump enables feature to dump memory of the target VM on crash.
 	MemoryDump bool `json:"memory_dump"`
 
-	// IsDirect enables sequence-template generation and mutation.
+	// IsDirect enables directed generation and mutation.
 	// When false, both stay the stock syzkaller behavior.
 	IsDirect bool `json:"isDirect,omitempty"`
-	// DisableDynamicTemplates keeps the directChains cold-start templates but skips
-	// corpus-based template discovery and verification. The default is false.
-	DisableDynamicTemplates bool `json:"disableDynamicTemplates,omitempty"`
-	// DirectChains are optional cold-start syscall sequences, used only when IsDirect is set.
-	// Each inner list is one chain of syscall names, for example ["socket", "sendmsg"].
-	DirectChains [][]string `json:"directChains,omitempty"`
+	// DirectTargets describe the target syscalls of directed fuzzing.
+	// Each entry names one target syscall and the related syscalls that produce
+	// the resources it consumes. Targets must be unique.
+	DirectTargets []DirectTarget `json:"directTargets,omitempty"`
+	// Directed defines the single kernel goal used for C/K admission and K/G
+	// scheduling. Unlike focus_areas, it never filters executor feedback.
+	Directed *DirectedConfig `json:"directed,omitempty"`
 
 	// Experimental options.
 	Experimental Experimental
 
 	// Implementation details beyond this point. Filled after parsing.
 	Derived `json:"-"`
+}
+
+type DirectedConfig struct {
+	Target DirectedKernelTarget `json:"target"`
+}
+
+// DirectedKernelTarget names coverage regions, not syscall variants or buckets.
+// Names and paths are literal; the subsystem is a source-directory prefix.
+type DirectedKernelTarget struct {
+	Func       string   `json:"func"`
+	CloseFuncs []string `json:"close_funcs,omitempty"`
+	Path       string   `json:"path,omitempty"`
+	Subsystem  string   `json:"subsystem,omitempty"`
+}
+
+// DirectTarget describes one directed fuzzing target: a target syscall and the
+// related syscalls that produce the resources it consumes.
+type DirectTarget struct {
+	// Target is the syscall that leads to the target code.
+	Target string `json:"target"`
+	// Related lists the syscalls that produce resources consumed by Target.
+	// They are alternatives: each generated program uses at most one of them.
+	// An empty list means Target needs no companion call, for example a
+	// pseudo-syscall that takes no fd such as syz_emit_vhci.
+	Related []string `json:"related,omitempty"`
 }
 
 // Experimental contains options that are not guaranteed to be backward- or forward-compatible

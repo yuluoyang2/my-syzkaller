@@ -16,6 +16,7 @@ import (
 	"github.com/google/syzkaller/pkg/cover"
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
+	"github.com/google/syzkaller/pkg/hash"
 	"github.com/google/syzkaller/pkg/signal"
 	"github.com/google/syzkaller/prog"
 )
@@ -27,7 +28,6 @@ const (
 	JobCandidateTriage JobType = "candidate_triage"
 	JobSmash           JobType = "smash"
 	JobHints           JobType = "hints"
-	JobTemplate        JobType = "template"
 )
 
 type job interface {
@@ -57,7 +57,7 @@ func genProgRequest(fuzzer *Fuzzer, rnd *rand.Rand) *queue.Request {
 		fuzzer.ChoiceTable())
 	return &queue.Request{
 		Prog:     p,
-		ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
+		ExecOpts: setFlags(fuzzer.execFlags()),
 		Stat:     fuzzer.statExecGenerate,
 	}
 }
@@ -76,9 +76,10 @@ func mutateProgRequest(fuzzer *Fuzzer, rnd *rand.Rand) *queue.Request {
 		fuzzer.mutateOptsFor(newP),
 	)
 	return &queue.Request{
-		Prog:     newP,
-		ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
-		Stat:     fuzzer.statExecFuzz,
+		Prog:      newP,
+		ExecOpts:  setFlags(fuzzer.execFlags()),
+		Stat:      fuzzer.statExecFuzz,
+		ParentSig: hash.String(p.Serialize()),
 	}
 }
 
@@ -94,6 +95,10 @@ type triageJob struct {
 	queue    queue.Executor
 	// Set of calls that gave potential new coverage.
 	calls map[int]*triageCall
+
+	// directed is set when the corpus has a directed goal. It carries the
+	// program-level StableCover shared by C triage and K verification.
+	directed *directedTriage
 
 	info *JobInfo
 }
@@ -143,7 +148,9 @@ const (
 
 func (job *triageJob) execute(req *queue.Request, flags ProgFlags) *queue.Result {
 	defer job.info.Execs.Add(1)
-	req.Important = true // All triage executions are important.
+	// Directed confirmation must observe the first crash, not have queue.Retry
+	// silently re-execute it to fill the required successful samples.
+	req.Important = job.directed == nil
 	return job.fuzzer.executeWithFlags(job.queue, req, flags)
 }
 
@@ -158,9 +165,20 @@ func (job *triageJob) run(fuzzer *Fuzzer) {
 
 	// Compute input coverage and non-flaky signal for minimization.
 	stop := job.deflake(job.execute)
+	if job.directed != nil {
+		if job.directedFinalize() {
+			// Reward the original mutation before minimization. A rejected or
+			// crashing simplification cannot replace this confirmed result.
+			job.settleDirected(job.directed.stable)
+		} else {
+			job.settleDirected(nil)
+		}
+	}
 	if stop {
 		return
 	}
+	// Raw-cover verification can expire while signal deflake succeeds. C is
+	// still a valid admission reason; leave its K metadata unconfirmed.
 	var wg sync.WaitGroup
 	for call, info := range job.calls {
 		wg.Go(func() {
@@ -168,6 +186,10 @@ func (job *triageJob) run(fuzzer *Fuzzer) {
 		})
 	}
 	wg.Wait()
+	if job.directed != nil && job.directed.confirmed && !job.directed.savedK.Load() &&
+		!job.directed.witness.Empty() {
+		job.saveDirectedOnly()
+	}
 }
 
 func (job *triageJob) handleCall(call int, info *triageCall) {
@@ -175,15 +197,23 @@ func (job *triageJob) handleCall(call int, info *triageCall) {
 		return
 	}
 
-	if job.p != nil && call >= -1 && call < len(job.p.Calls) {
-		job.fuzzer.offerDirectCandidate(corpus.NewInput{
-			Prog:  job.p,
-			Call:  call,
-			Cover: info.cover.Serialize(),
-		})
-	}
 	p := job.p
-	if job.flags&ProgMinimized == 0 {
+	var cover []uint64
+	var stableSignal signal.Signal
+	if job.directed != nil {
+		if !job.directed.confirmed {
+			// Keep the original C-verified program if no valid program-level
+			// cover could be confirmed. Do not invent K=0 or a K witness.
+			cover, stableSignal = info.cover.Serialize(), info.stableSignal
+		} else if job.flags&ProgMinimized == 0 {
+			p, call, cover, stableSignal = job.minimizeDirected(call, info)
+			if p == nil {
+				return
+			}
+		} else {
+			cover, stableSignal = job.directed.stable, info.stableSignal
+		}
+	} else if job.flags&ProgMinimized == 0 {
 		p, call = job.minimize(call, info)
 		if p == nil {
 			return
@@ -224,6 +254,10 @@ func (job *triageJob) handleCall(call int, info *triageCall) {
 		}
 	}
 	job.fuzzer.Logf(2, "added new input for %v to the corpus: %s", callName, p)
+	if job.directed != nil {
+		job.saveDirected(p, call, cover, stableSignal, info.newStableSignal)
+		return
+	}
 	input := corpus.NewInput{
 		Prog:     p,
 		Call:     call,
@@ -245,6 +279,7 @@ func (job *triageJob) deflake(exec func(*queue.Request, ProgFlags) *queue.Result
 		needRuns = deflakeNeedRuns
 	}
 	prevTotalNewSignal := 0
+	signalDone := false
 	for run := 1; ; run++ {
 		totalNewSignal := 0
 		indices := make([]int, 0, len(job.calls))
@@ -252,8 +287,23 @@ func (job *triageJob) deflake(exec func(*queue.Request, ProgFlags) *queue.Result
 			indices = append(indices, call)
 			totalNewSignal += len(info.newSignal)
 		}
-		if job.stopDeflake(run, needRuns, prevTotalNewSignal == totalNewSignal) {
-			break
+		hasCalls := len(job.calls) != 0
+		signalStop := job.stopDeflake(run, needRuns, prevTotalNewSignal == totalNewSignal)
+		if job.directed == nil {
+			if signalStop {
+				break
+			}
+		} else {
+			// Waiting for complete raw cover must not extend C's original
+			// deflake window and turn later flaky signals into stable C.
+			signalDone = signalDone || hasCalls && signalStop
+			haveCover := len(job.directed.covers) >= directedNeedRuns
+			if haveCover && (!hasCalls || signalDone) {
+				break
+			}
+			if run >= directedMaxRuns {
+				break
+			}
 		}
 		prevTotalNewSignal = totalNewSignal
 		result := exec(&queue.Request{
@@ -264,11 +314,28 @@ func (job *triageJob) deflake(exec func(*queue.Request, ProgFlags) *queue.Result
 			Stat:            job.fuzzer.statExecTriage,
 		}, progInTriage)
 		if result.Stop() {
+			if job.directed != nil && result.Status == queue.ExecFailure && job.fuzzer.ctx.Err() == nil {
+				continue
+			}
+			if job.directed != nil && signalDone {
+				// C was already decided before the extra K confirmation. A
+				// terminal K result must not erase that frozen C decision.
+				break
+			}
 			return true
 		}
 		avoid = append(avoid, result.Executor)
 		if result.Info == nil {
 			continue // the program has failed
+		}
+		if job.directed != nil {
+			if cover, ok := directedRunCover(job.p, result); ok &&
+				len(job.directed.covers) < directedNeedRuns {
+				job.directed.covers = append(job.directed.covers, cover)
+			}
+			if signalDone {
+				continue
+			}
 		}
 		deflakeCall := func(call int, res *flatrpc.CallInfo) {
 			info := job.calls[call]
@@ -474,7 +541,7 @@ func (job *smashJob) run(fuzzer *Fuzzer) {
 			fuzzer.Config.Corpus.Programs())
 		result := fuzzer.execute(job.exec, &queue.Request{
 			Prog:     p,
-			ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
+			ExecOpts: setFlags(fuzzer.execFlags()),
 			Stat:     fuzzer.statExecSmash,
 		})
 		if result.Stop() {
@@ -587,7 +654,7 @@ func (job *hintsJob) run(fuzzer *Fuzzer) {
 			defer job.info.Execs.Add(1)
 			result := fuzzer.execute(job.exec, &queue.Request{
 				Prog:     p,
-				ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
+				ExecOpts: setFlags(fuzzer.execFlags()),
 				Stat:     fuzzer.statExecHint,
 			})
 			return !result.Stop()

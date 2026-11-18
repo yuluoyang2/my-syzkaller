@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"sort"
 	"sync"
 
 	"github.com/google/syzkaller/pkg/cover"
@@ -25,8 +24,8 @@ type Corpus struct {
 	ctx      context.Context
 	mu       sync.RWMutex
 	progsMap map[string]*Item
-	signal   signal.Signal // total signal of all items
-	cover    cover.Cover   // total coverage of all items
+	signal   signal.Signal
+	cover    cover.Cover
 	updates  chan<- NewItemEvent
 
 	*ProgramsList
@@ -35,6 +34,7 @@ type Corpus struct {
 	StatCover  *stat.Val
 
 	focusAreas []*focusAreaState
+	directed   *directedState
 }
 
 type focusAreaState struct {
@@ -84,39 +84,35 @@ func NewFocusedCorpus(ctx context.Context, updates chan<- NewItemEvent, areas []
 		if len(area.CoverPCs) == 0 {
 			obj = corpus.ProgramsList
 		} else if len(areas) > 1 && area.Name != "" {
-			// Only show extra statistics if there's more than one area.
 			stat.New("corpus ["+area.Name+"]",
 				fmt.Sprintf("Corpus programs of the focus area %q", area.Name),
 				stat.Console, stat.Graph("corpus"),
 				stat.LenOf(&obj.progs, &corpus.mu))
 		}
 		corpus.focusAreas = append(corpus.focusAreas, &focusAreaState{
-			FocusArea:    area,
-			ProgramsList: obj,
+			FocusArea: area, ProgramsList: obj,
 		})
 	}
 	return corpus
 }
 
 // ItemUpdate represents an update to a corpus item.
-// A single program may be relevant for multiple syscalls, resulting in multiple
-// ItemUpdate entities.
+// A single program may be relevant for multiple syscalls.
 type ItemUpdate struct {
 	Call     int
 	RawCover []uint64
 }
 
-// Item objects are to be treated as immutable, otherwise it's just
-// too hard to synchonize accesses to them across the whole project.
-// When Corpus updates one of its items, it saves a copy of it.
+// Items are immutable. Updates publish a copy, including directed metadata.
 type Item struct {
-	Sig     string
-	Call    int
-	Prog    *prog.Prog
-	HasAny  bool // whether the prog contains squashed arguments
-	Signal  signal.Signal
-	Cover   []uint64
-	Updates []ItemUpdate
+	Sig      string
+	Call     int
+	Prog     *prog.Prog
+	HasAny   bool
+	Signal   signal.Signal
+	Cover    []uint64
+	Updates  []ItemUpdate
+	Directed *DirectedInput
 
 	areas map[*focusAreaState]struct{}
 }
@@ -131,83 +127,78 @@ type NewInput struct {
 	Signal   signal.Signal
 	Cover    []uint64
 	RawCover []uint64
+	Directed *DirectedInput
 }
 
 type NewItemEvent struct {
-	Sig      string
-	Exists   bool
-	ProgData []byte
-	NewCover []uint64
+	Sig       string
+	Exists    bool
+	ProgData  []byte
+	NewCover  []uint64
+	StateOnly bool // directed gain history changed without a new corpus program
 }
 
 func (corpus *Corpus) Save(inp NewInput) {
 	progData := inp.Prog.Serialize()
 	sig := hash.String(progData)
-
 	corpus.mu.Lock()
-	defer corpus.mu.Unlock()
+	update := corpus.saveLocked(inp, progData, sig)
+	corpus.mu.Unlock()
+	corpus.sendUpdate(update)
+}
 
-	update := ItemUpdate{
-		Call:     inp.Call,
-		RawCover: inp.RawCover,
+// sendUpdate may block. Callers must release mu before publishing, since the
+// update consumer can read a corpus snapshot while processing an earlier event.
+func (corpus *Corpus) sendUpdate(update NewItemEvent) {
+	if corpus.updates != nil {
+		select {
+		case <-corpus.ctx.Done():
+		case corpus.updates <- update:
+		}
 	}
-	exists := false
-	if old, ok := corpus.progsMap[sig]; ok {
-		exists = true
+}
+
+func (corpus *Corpus) saveLocked(inp NewInput, progData []byte, sig string) NewItemEvent {
+	update := ItemUpdate{Call: inp.Call, RawCover: slices.Clone(inp.RawCover)}
+	old, exists := corpus.progsMap[sig]
+	var item *Item
+	if exists {
 		newSignal := old.Signal.Copy()
 		newSignal.Merge(inp.Signal)
 		var newCover cover.Cover
 		newCover.Merge(old.Cover)
 		newCover.Merge(inp.Cover)
-		newItem := &Item{
-			Sig:     sig,
-			Prog:    old.Prog,
-			Call:    old.Call,
-			HasAny:  old.HasAny,
-			Signal:  newSignal,
-			Cover:   newCover.Serialize(),
-			Updates: slices.Clone(old.Updates),
-			areas:   maps.Clone(old.areas),
+		item = &Item{
+			Sig: sig, Prog: old.Prog, Call: old.Call, HasAny: old.HasAny,
+			Signal: newSignal, Cover: newCover.Serialize(), Updates: slices.Clone(old.Updates),
+			areas: maps.Clone(old.areas), Directed: cloneDirected(old.Directed),
 		}
-		const maxUpdates = 32
-		if len(newItem.Updates) < maxUpdates {
-			newItem.Updates = append(newItem.Updates, update)
+		if len(item.Updates) < 32 {
+			item.Updates = append(item.Updates, update)
 		}
-		corpus.progsMap[sig] = newItem
-		corpus.applyFocusAreas(newItem)
 	} else {
-		item := &Item{
-			Sig:     sig,
-			Call:    inp.Call,
-			Prog:    inp.Prog,
-			HasAny:  inp.Prog.ContainsAny(),
-			Signal:  inp.Signal,
-			Cover:   inp.Cover,
-			Updates: []ItemUpdate{update},
+		item = &Item{
+			Sig: sig, Call: inp.Call, Prog: inp.Prog, HasAny: inp.Prog.ContainsAny(),
+			Signal: inp.Signal, Cover: inp.Cover, Updates: []ItemUpdate{update},
 		}
-		corpus.progsMap[sig] = item
-		corpus.applyFocusAreas(item)
+	}
+	if inp.Directed != nil {
+		item.Directed = cloneDirected(inp.Directed)
+	}
+	corpus.progsMap[sig] = item
+	corpus.applyFocusAreas(item)
+	if !exists {
 		corpus.saveProgram(inp.Prog, len(inp.Signal))
 	}
+	corpus.updateDirectedLocked(sig, exists)
 	corpus.signal.Merge(inp.Signal)
 	newCover := corpus.cover.MergeDiff(inp.Cover)
-	if corpus.updates != nil {
-		select {
-		case <-corpus.ctx.Done():
-		case corpus.updates <- NewItemEvent{
-			Sig:      sig,
-			Exists:   exists,
-			ProgData: progData,
-			NewCover: newCover,
-		}:
-		}
-	}
+	return NewItemEvent{Sig: sig, Exists: exists, ProgData: progData, NewCover: newCover}
 }
 
 func (corpus *Corpus) applyFocusAreas(item *Item) {
 	for _, area := range corpus.focusAreas {
 		if len(area.CoverPCs) == 0 {
-			// Already handled via corpus.ProgramsList.
 			continue
 		}
 		if _, ok := item.areas[area]; ok {
@@ -261,9 +252,8 @@ func (corpus *Corpus) CallCover() map[string]*CallCov {
 		if calls[call] == nil {
 			calls[call] = new(CallCov)
 		}
-		cc := calls[call]
-		cc.Count++
-		cc.Cover.Merge(inp.Cover)
+		calls[call].Count++
+		calls[call].Cover.Merge(inp.Cover)
 	}
 	return calls
 }
@@ -276,119 +266,6 @@ func (corpus *Corpus) ProgsPerArea() map[string]int {
 		ret[item.Name] = len(item.progs)
 	}
 	return ret
-}
-
-// FocusTier is one directed bucket and the seeds currently inside it.
-// A seed that hits several buckets appears in each of them.
-type FocusTier struct {
-	Class  string
-	Name   string
-	Weight float64
-	Seeds  []FocusSeed
-}
-
-// FocusSeed is one corpus program that intersects a focus tier.
-type FocusSeed struct {
-	Sig   string
-	Short string
-	Hits  int
-}
-
-func (corpus *Corpus) FocusTiers() []FocusTier {
-	corpus.mu.RLock()
-	defer corpus.mu.RUnlock()
-	tiers := make([]FocusTier, 0, len(corpus.focusAreas))
-	for _, area := range corpus.focusAreas {
-		if len(area.CoverPCs) == 0 {
-			continue
-		}
-		class := focusClass(area.Name)
-		if class == "" {
-			continue
-		}
-		tier := FocusTier{
-			Class:  class,
-			Name:   area.Name,
-			Weight: area.Weight,
-		}
-		for _, item := range corpus.progsMap {
-			if _, ok := item.areas[area]; !ok {
-				continue
-			}
-			tier.Seeds = append(tier.Seeds, FocusSeed{
-				Sig:   item.Sig,
-				Short: item.Prog.String(),
-				Hits:  area.inAreaPCs(item.Cover),
-			})
-		}
-		sort.Slice(tier.Seeds, func(i, j int) bool {
-			if tier.Seeds[i].Hits != tier.Seeds[j].Hits {
-				return tier.Seeds[i].Hits > tier.Seeds[j].Hits
-			}
-			return tier.Seeds[i].Short < tier.Seeds[j].Short
-		})
-		tiers = append(tiers, tier)
-	}
-	sort.Slice(tiers, func(i, j int) bool {
-		ri, rj := focusClassRank(tiers[i].Class), focusClassRank(tiers[j].Class)
-		if ri != rj {
-			return ri < rj
-		}
-		return tiers[i].Name < tiers[j].Name
-	})
-	return tiers
-}
-
-func focusClass(name string) string {
-	switch name {
-	case "A", "B", "C", "D":
-		return name
-	default:
-		return ""
-	}
-}
-
-func focusClassRank(class string) int {
-	switch class {
-	case "A":
-		return 0
-	case "B":
-		return 1
-	case "C":
-		return 2
-	case "D":
-		return 3
-	default:
-		return 4
-	}
-}
-
-// BestFocus returns the highest focus class hit by cover and the PCs in that class.
-// Classes are A (target), B (hop1), C (hop2), D (subsystem). An empty class means no hit.
-func (corpus *Corpus) BestFocus(cover []uint64) (class string, pcs []uint64) {
-	corpus.mu.RLock()
-	defer corpus.mu.RUnlock()
-	bestRank := focusClassRank("")
-	for _, area := range corpus.focusAreas {
-		areaClass := focusClass(area.Name)
-		if len(area.CoverPCs) == 0 || areaClass == "" {
-			continue
-		}
-		rank := focusClassRank(areaClass)
-		if rank >= bestRank {
-			continue
-		}
-		var got []uint64
-		for _, pc := range cover {
-			if _, ok := area.CoverPCs[pc]; ok {
-				got = append(got, pc)
-			}
-		}
-		if len(got) != 0 {
-			class, pcs, bestRank = areaClass, got, rank
-		}
-	}
-	return class, pcs
 }
 
 func (corpus *Corpus) Cover() []uint64 {

@@ -212,6 +212,12 @@ func Complete(cfg *Config) error {
 	if err != nil {
 		return err
 	}
+	if err := cfg.completeDirectTargets(); err != nil {
+		return err
+	}
+	if err := cfg.completeDirected(); err != nil {
+		return err
+	}
 	if err := cfg.completeFocusAreas(); err != nil {
 		return err
 	}
@@ -370,6 +376,93 @@ func (cfg *Config) completeBinaries() error {
 			return fmt.Errorf("bad config param strace_bin: can't find %v", cfg.StraceBin)
 		}
 		cfg.StraceBin = osutil.Abs(cfg.StraceBin)
+	}
+	return nil
+}
+
+// completeDirectTargets validates directTargets: every name must be a known,
+// enabled and generatable syscall, targets must be unique, and each related
+// syscall must produce a resource that the target consumes. Without the
+// resource check a typo in the config silently generates programs whose target
+// call gets a default resource value and never reaches the target.
+func (cfg *Config) completeDirectTargets() error {
+	if len(cfg.DirectTargets) == 0 {
+		if cfg.IsDirect {
+			return fmt.Errorf("isDirect is set, but directTargets is empty")
+		}
+		return nil
+	}
+	if !cfg.IsDirect {
+		return fmt.Errorf("directTargets is set, but isDirect is not")
+	}
+	seen := map[string]bool{}
+	for i, target := range cfg.DirectTargets {
+		name := target.Target
+		if name == "" {
+			return fmt.Errorf("directTargets[%d]: empty target", i)
+		}
+		if seen[name] {
+			return fmt.Errorf("duplicate direct target %q", name)
+		}
+		seen[name] = true
+		meta := cfg.Target.SyscallMap[name]
+		if meta == nil {
+			return fmt.Errorf("directTargets[%d]: unknown syscall %q", i, name)
+		}
+		if meta.Attrs.Disabled || meta.Attrs.NoGenerate {
+			return fmt.Errorf("directTargets[%d]: syscall %q cannot be generated", i, name)
+		}
+		if !slices.Contains(cfg.Syscalls, meta.ID) {
+			return fmt.Errorf("directTargets[%d]: syscall %q is not enabled", i, name)
+		}
+		for _, related := range target.Related {
+			if related == "" {
+				return fmt.Errorf("directTargets[%d]: empty related syscall", i)
+			}
+			rname := related
+			if rmeta := cfg.Target.SyscallMap[rname]; rmeta == nil {
+				return fmt.Errorf("directTargets[%d]: unknown related syscall %q", i, rname)
+			} else if rmeta.Attrs.Disabled || rmeta.Attrs.NoGenerate {
+				return fmt.Errorf("directTargets[%d]: related syscall %q cannot be generated", i, rname)
+			} else if !slices.Contains(cfg.Syscalls, rmeta.ID) {
+				return fmt.Errorf("directTargets[%d]: related syscall %q is not enabled", i, rname)
+			}
+			if err := cfg.Target.CheckCallPair(name, rname); err != nil {
+				return fmt.Errorf("directTargets[%d]: %w", i, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (cfg *Config) completeDirected() error {
+	if cfg.Directed == nil {
+		if cfg.IsDirect {
+			return fmt.Errorf("isDirect requires directed.target; experimental.focus_areas is not directed scoring")
+		}
+		return nil
+	}
+	if !cfg.IsDirect {
+		return fmt.Errorf("directed requires isDirect")
+	}
+	if !cfg.Cover {
+		return fmt.Errorf("directed requires real KCOV coverage")
+	}
+	if cfg.KernelObj == "" {
+		return fmt.Errorf("directed requires kernel_obj for PC mapping")
+	}
+	if strings.TrimSpace(cfg.Directed.Target.Func) == "" {
+		return fmt.Errorf("directed.target.func is required")
+	}
+	if len(cfg.Experimental.FocusAreas) != 0 || !cfg.CovFilter.Empty() {
+		return fmt.Errorf("directed scoring requires unfiltered signal; remove focus_areas and cover_filter")
+	}
+	seen := make(map[string]bool)
+	for _, name := range cfg.Directed.Target.CloseFuncs {
+		if strings.TrimSpace(name) == "" || seen[name] {
+			return fmt.Errorf("directed.target.close_funcs contains an empty or duplicate name %q", name)
+		}
+		seen[name] = true
 	}
 	return nil
 }

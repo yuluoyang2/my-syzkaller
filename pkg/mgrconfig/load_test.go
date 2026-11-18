@@ -4,6 +4,7 @@
 package mgrconfig
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -124,6 +125,119 @@ func TestCompleteDescriptionsMode(t *testing.T) {
 	_, err := LoadData(data)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), `invalid descriptions_mode "invalid", must be one of: any, auto, manual`)
+}
+
+func TestCompleteDirectTargets(t *testing.T) {
+	target, err := prog.GetTarget(targets.Linux, targets.AMD64)
+	require.NoError(t, err)
+	var enabledIDs []int
+	for _, meta := range target.SyscallMap {
+		enabledIDs = append(enabledIDs, meta.ID)
+	}
+	const (
+		targetCall  = "ioctl$sock_netrom_SIOCADDRT"
+		relatedCall = "syz_init_net_socket$netrom"
+	)
+	tests := []struct {
+		name     string
+		isDirect bool
+		targets  []DirectTarget
+		err      string
+	}{
+		{name: "none"},
+		{
+			name: "valid", isDirect: true,
+			targets: []DirectTarget{{Target: targetCall, Related: []string{relatedCall}}},
+		},
+		{
+			// A target with no resource dependency, e.g. a pseudo-syscall that
+			// needs no fd, is valid with an empty related list.
+			name: "no related", isDirect: true,
+			targets: []DirectTarget{{Target: "syz_emit_vhci"}},
+		},
+		{
+			name: "direct without targets", isDirect: true,
+			err: "isDirect is set, but directTargets is empty",
+		},
+		{
+			name:    "targets without direct",
+			targets: []DirectTarget{{Target: targetCall}},
+			err:     "directTargets is set, but isDirect is not",
+		},
+		{
+			name: "empty target", isDirect: true,
+			targets: []DirectTarget{{}},
+			err:     "directTargets[0]: empty target",
+		},
+		{
+			name: "unknown target", isDirect: true,
+			targets: []DirectTarget{{Target: "not_a_syscall"}},
+			err:     `directTargets[0]: unknown syscall "not_a_syscall"`,
+		},
+		{
+			name: "duplicate target", isDirect: true,
+			targets: []DirectTarget{{Target: targetCall}, {Target: targetCall}},
+			err:     fmt.Sprintf("duplicate direct target %q", targetCall),
+		},
+		{
+			name: "unknown related", isDirect: true,
+			targets: []DirectTarget{{Target: targetCall, Related: []string{"not_a_syscall"}}},
+			err:     `directTargets[0]: unknown related syscall "not_a_syscall"`,
+		},
+		{
+			name: "empty related", isDirect: true,
+			targets: []DirectTarget{{Target: targetCall, Related: []string{""}}},
+			err:     "directTargets[0]: empty related syscall",
+		},
+		{
+			name: "reversed pair", isDirect: true,
+			targets: []DirectTarget{{Target: relatedCall, Related: []string{targetCall}}},
+			err:     fmt.Sprintf("%q produces no resource consumed by %q", targetCall, relatedCall),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &Config{
+				Derived: Derived{
+					Target:   target,
+					Syscalls: enabledIDs,
+				},
+				IsDirect:      test.isDirect,
+				DirectTargets: test.targets,
+			}
+			err := cfg.completeDirectTargets()
+			if test.err == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			require.Contains(t, err.Error(), test.err)
+		})
+	}
+}
+
+func TestCompleteDirectTargetsNotEnabled(t *testing.T) {
+	target, err := prog.GetTarget(targets.Linux, targets.AMD64)
+	require.NoError(t, err)
+	const (
+		targetCall  = "ioctl$sock_netrom_SIOCADDRT"
+		relatedCall = "syz_init_net_socket$netrom"
+	)
+	// Only the target is enabled, so the related call cannot be generated.
+	cfg := &Config{
+		Derived: Derived{
+			Target:   target,
+			Syscalls: []int{target.SyscallMap[targetCall].ID},
+		},
+		IsDirect: true,
+		DirectTargets: []DirectTarget{{
+			Target:  targetCall,
+			Related: []string{relatedCall},
+		}},
+	}
+	err = cfg.completeDirectTargets()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `related syscall "syz_init_net_socket$netrom" is not enabled`)
 }
 
 func TestFormatTarget(t *testing.T) {

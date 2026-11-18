@@ -43,6 +43,10 @@ type Request struct {
 	// Important requests will be retried even from crashed VMs.
 	Important bool
 
+	// ParentSig is the corpus item signature this mutation was derived from.
+	// It is empty for generated programs and for requests that are not mutations.
+	ParentSig string
+
 	// Avoid specifies set of executors that are preferable to avoid when executing this request.
 	// The restriction is soft since there can be only one executor at all or available right now.
 	Avoid []ExecutorID

@@ -155,7 +155,7 @@ func TestMutateArgument(t *testing.T) {
 					corpus: nil,
 					opts:   DefaultMutateOpts,
 				}
-				ctx.mutateArg()
+				ctx.mutateArg(-1)
 				data1 := p1.Serialize()
 				if bytes.Equal(want, data1) {
 					t.Logf("success on iter %v", i)
@@ -305,7 +305,7 @@ func TestSizeMutateArg(t *testing.T) {
 				corpus: nil,
 				opts:   DefaultMutateOpts,
 			}
-			ctx.mutateArg()
+			ctx.mutateArg(-1)
 			ForeachArg(p.Calls[0], func(arg Arg, ctx *ArgCtx) {
 				if _, ok := arg.Type().(*IntType); !ok {
 					return

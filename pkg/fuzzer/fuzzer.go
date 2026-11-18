@@ -43,8 +43,9 @@ type Fuzzer struct {
 
 	execQueues
 
-	// templates is used only when Config.IsDirect is set.
-	templates *directPool
+	// directNames are the configured target calls. Mutation prefers them.
+	// Set only when Config.IsDirect is set.
+	directNames map[string]struct{}
 }
 
 func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
@@ -71,25 +72,28 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 	f.execQueues = newExecQueues(f)
 	f.updateChoiceTable(nil)
 	if cfg.IsDirect {
-		f.templates = newDirectPool()
-		added, errs := f.templates.addCold(target, cfg.DirectChains, f.ChoiceTable(), rnd)
-		for _, err := range errs {
-			f.Logf(0, "direct: %s", err)
+		f.directNames = make(map[string]struct{}, len(cfg.DirectTargets))
+		for _, target := range cfg.DirectTargets {
+			f.directNames[target.Target] = struct{}{}
 		}
-		if cfg.DisableDynamicTemplates {
-			f.Logf(0, "direct: %d cold-start chains, dynamic template discovery disabled", added)
-		} else {
-			f.Logf(0, "direct: sequence templates enabled (%d cold-start chains)", added)
-			if n := f.templates.sync(cfg.Corpus); n > 0 {
-				f.Logf(0, "direct: %d corpus programs queued for template verification", n)
-			}
-		}
+		f.Logf(0, "direct: %d targets", len(cfg.DirectTargets))
 	}
 	go f.choiceTableUpdater()
 	if cfg.Debug {
 		go f.logCurrentStats()
 	}
 	return f
+}
+
+// execFlags returns the execution flags used by fuzzing requests. Directed
+// fuzzing needs raw PCs for every execution, because K is defined on raw
+// coverage rather than on hashed signal.
+func (fuzzer *Fuzzer) execFlags() flatrpc.ExecFlag {
+	flags := flatrpc.ExecFlagCollectSignal
+	if fuzzer.Config.IsDirect {
+		flags |= flatrpc.ExecFlagCollectCover
+	}
+	return flags
 }
 
 func (fuzzer *Fuzzer) RecommendedCalls() int {
@@ -169,36 +173,49 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 	// We do it before unblocking the waiting threads because
 	// it may result it concurrent modification of req.Prog.
 	var triage map[int]*triageCall
+	var kCandidate corpus.DirectedWitness
+	directedCoverage := fuzzer.directedCoverage()
 	if req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectSignal > 0 && res.Info != nil && !dontTriage {
 		for call, info := range res.Info.Calls {
 			fuzzer.triageProgCall(req.Prog, info, call, &triage)
 		}
 		fuzzer.triageProgCall(req.Prog, res.Info.Extra, -1, &triage)
-
-		if len(triage) != 0 {
-			queue, stat := fuzzer.triageQueue, fuzzer.statJobsTriage
-			jobType := JobTriage
-			if flags&progCandidate > 0 {
-				queue, stat = fuzzer.triageCandidateQueue, fuzzer.statJobsTriageCandidate
-				jobType = JobCandidateTriage
-			}
-			job := &triageJob{
-				p:        req.Prog.Clone(),
-				executor: res.Executor,
-				flags:    flags,
-				queue:    queue.Append(),
-				calls:    triage,
-				info: &JobInfo{
-					Name: req.Prog.String(),
-					Type: jobType,
-				},
-			}
-			for id := range triage {
-				job.info.Calls = append(job.info.Calls, job.p.CallName(id))
-			}
-			slices.Sort(job.info.Calls)
-			fuzzer.startJob(stat, job)
+		if directedCoverage != nil {
+			kCandidate = fuzzer.directedCandidate(req.Prog, res)
 		}
+	}
+
+	jobStarted := false
+	if len(triage) != 0 || !kCandidate.Empty() {
+		queue, stat := fuzzer.triageQueue, fuzzer.statJobsTriage
+		jobType := JobTriage
+		if flags&progCandidate > 0 {
+			queue, stat = fuzzer.triageCandidateQueue, fuzzer.statJobsTriageCandidate
+			jobType = JobCandidateTriage
+		}
+		job := &triageJob{
+			p:        req.Prog.Clone(),
+			executor: res.Executor,
+			flags:    flags,
+			queue:    queue.Append(),
+			calls:    triage,
+			info: &JobInfo{
+				Name: req.Prog.String(),
+				Type: jobType,
+			},
+		}
+		if directedCoverage != nil {
+			job.directed = fuzzer.newDirectedTriage(req.Prog, req.ParentSig, kCandidate)
+		}
+		for id := range triage {
+			job.info.Calls = append(job.info.Calls, job.p.CallName(id))
+		}
+		slices.Sort(job.info.Calls)
+		jobStarted = true
+		fuzzer.startJob(stat, job)
+	}
+	if !jobStarted && req.ParentSig != "" {
+		fuzzer.recordDirectedGain(req.ParentSig, nil)
 	}
 
 	if res.Info != nil {
@@ -219,7 +236,7 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 			maxCandidateAttempts = 0
 		}
 	}
-	if len(triage) == 0 && flags&ProgFromCorpus != 0 && attempt < maxCandidateAttempts {
+	if !jobStarted && len(triage) == 0 && flags&ProgFromCorpus != 0 && attempt < maxCandidateAttempts {
 		fuzzer.enqueue(fuzzer.candidateQueue, req, flags, attempt+1)
 		return false
 	}
@@ -244,11 +261,10 @@ type Config struct {
 	NewInputFilter func(call string) bool
 	PatchTest      bool
 	ModeKFuzzTest  bool
-	// IsDirect turns on sequence-template generation and mutation.
+	// IsDirect turns on directed generation and mutation.
 	// When false, genFuzz keeps the stock 95/5 mutate/generate split.
-	IsDirect                bool
-	DisableDynamicTemplates bool
-	DirectChains            [][]string
+	IsDirect      bool
+	DirectTargets []mgrconfig.DirectTarget
 }
 
 func (fuzzer *Fuzzer) triageProgCall(p *prog.Prog, info *flatrpc.CallInfo, call int, triage *map[int]*triageCall) {
@@ -313,9 +329,6 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 		// more frequently because fallback signal is weak.
 		mutateRate = 0.5
 	}
-	if fuzzer.Config.IsDirect {
-		fuzzer.refreshDirect()
-	}
 	var req *queue.Request
 	rnd := fuzzer.rand()
 	if rnd.Float64() < mutateRate {
@@ -329,8 +342,10 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 	}
 	if fuzzer.Config.Collide && rnd.Intn(3) == 0 {
 		req = &queue.Request{
-			Prog: randomCollide(req.Prog, rnd),
-			Stat: fuzzer.statExecCollide,
+			Prog:      randomCollide(req.Prog, rnd),
+			ExecOpts:  setFlags(fuzzer.execFlags()),
+			Stat:      fuzzer.statExecCollide,
+			ParentSig: req.ParentSig,
 		}
 	}
 	fuzzer.prepare(req, 0, 0)
@@ -400,7 +415,7 @@ func (fuzzer *Fuzzer) AddCandidates(candidates []Candidate) {
 	for _, candidate := range candidates {
 		req := &queue.Request{
 			Prog:      candidate.Prog,
-			ExecOpts:  setFlags(flatrpc.ExecFlagCollectSignal),
+			ExecOpts:  setFlags(fuzzer.execFlags()),
 			Stat:      fuzzer.statExecCandidate,
 			Important: true,
 		}

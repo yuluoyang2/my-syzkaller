@@ -37,19 +37,29 @@ func (corpus *Corpus) Minimize(cover bool) {
 		return len(first.Prog.Calls) < len(second.Prog.Calls)
 	})
 
-	corpus.progsMap = make(map[string]*Item)
+	retained := make(map[string]*Item)
+	if corpus.directed != nil {
+		retained = corpus.minimizeDirectedLocked(inputs)
+	} else {
+		for _, ctx := range signal.Minimize(inputs) {
+			inp := ctx.(*Item)
+			retained[inp.Sig] = inp
+		}
+	}
+	corpus.progsMap = retained
 
 	// Clear the program lists in-place to keep statistics references valid.
 	corpus.ProgramsList.clear()
 	for _, area := range corpus.focusAreas {
 		area.ProgramsList.clear()
 	}
-	for _, ctx := range signal.Minimize(inputs) {
-		inp := ctx.(*Item)
-		corpus.progsMap[inp.Sig] = inp
+	for _, inp := range retained {
 		corpus.saveProgram(inp.Prog, len(inp.Signal))
 		for area := range inp.areas {
 			area.saveProgram(inp.Prog, area.inAreaPCs(inp.Cover))
 		}
+	}
+	if corpus.directed != nil {
+		corpus.rebuildDirectedLocked()
 	}
 }

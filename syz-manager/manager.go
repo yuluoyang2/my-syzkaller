@@ -85,7 +85,9 @@ type Manager struct {
 	checkDone       atomic.Bool
 	reportGenerator *manager.ReportGeneratorWrapper
 	fresh           bool
-	coverFilters    manager.CoverageFilters
+	coverFilters     manager.CoverageFilters
+	directedCoverage *corpus.DirectedCoverage
+	directedBuild    string
 
 	dash *dashapi.Dashboard
 	// This is specifically separated from dash, so that we can keep dash = nil when
@@ -991,6 +993,15 @@ func (mgr *Manager) extractMemoryDump(inst *vm.Instance, rep *report.Report) str
 
 func (mgr *Manager) corpusInputHandler(updates <-chan corpus.NewItemEvent) {
 	for update := range updates {
+		if mgr.directedCoverage != nil {
+			if err := manager.SaveDirectedGainState(filepath.Join(mgr.cfg.Workdir, "directed-gain.json"),
+				mgr.directedBuild, mgr.corpus.DirectedGainHistory()); err != nil {
+				log.Errorf("failed to save directed gain history: %v", err)
+			}
+		}
+		if update.StateOnly {
+			continue
+		}
 		if len(update.NewCover) != 0 && mgr.coverFilters.ExecutorFilter != nil {
 			filtered := 0
 			for _, pc := range update.NewCover {
@@ -1171,8 +1182,18 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 	switch mgr.mode {
 	case ModeFuzzing, ModeCorpusTriage:
 		corpusUpdates := make(chan corpus.NewItemEvent, 128)
-		mgr.corpus = corpus.NewFocusedCorpus(context.Background(),
-			corpusUpdates, mgr.coverFilters.Areas)
+		if mgr.directedCoverage != nil {
+			mgr.corpus = corpus.NewDirectedCorpus(context.Background(), corpusUpdates, mgr.directedCoverage)
+			pcs, err := manager.LoadDirectedGainState(filepath.Join(mgr.cfg.Workdir, "directed-gain.json"),
+				mgr.directedBuild)
+			if err == nil {
+				mgr.corpus.RestoreDirectedGainHistory(pcs)
+			} else if !os.IsNotExist(err) {
+				log.Logf(0, "directed: rebuild gain baseline by corpus replay: %v", err)
+			}
+		} else {
+			mgr.corpus = corpus.NewFocusedCorpus(context.Background(), corpusUpdates, mgr.coverFilters.Areas)
+		}
 		mgr.http.Corpus.Store(mgr.corpus)
 
 		rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -1197,10 +1218,9 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 				defer mgr.mu.Unlock()
 				return !mgr.saturatedCalls[call]
 			},
-			ModeKFuzzTest:           mgr.cfg.Experimental.EnableKFuzzTest,
-			IsDirect:                mgr.cfg.IsDirect,
-			DisableDynamicTemplates: mgr.cfg.DisableDynamicTemplates,
-			DirectChains:            mgr.cfg.DirectChains,
+			ModeKFuzzTest: mgr.cfg.Experimental.EnableKFuzzTest,
+			IsDirect:      mgr.cfg.IsDirect,
+			DirectTargets: mgr.cfg.DirectTargets,
 		}, rnd, mgr.target)
 		fuzzerObj.AddCandidates(candidates)
 		mgr.fuzzer.Store(fuzzerObj)
@@ -1525,7 +1545,12 @@ func (mgr *Manager) CoverageFilter(modules []*vminfo.KernelModule) ([]uint64, er
 	if err != nil {
 		return nil, fmt.Errorf("failed to init coverage filter: %w", err)
 	}
+	directedCoverage, directedBuild, err := manager.PrepareDirectedCoverage(mgr.reportGenerator, mgr.cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize directed coverage: %w", err)
+	}
 	mgr.coverFilters = filters
+	mgr.directedCoverage, mgr.directedBuild = directedCoverage, directedBuild
 	mgr.http.Cover.Store(&manager.CoverageInfo{
 		Modules:         modules,
 		ReportGenerator: mgr.reportGenerator,

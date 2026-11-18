@@ -48,13 +48,18 @@ type MutateOpts struct {
 	InsertWeight       int
 	MutateArgWeight    int
 	RemoveCallWeight   int
-	// PrefixLen > 0 biases argument mutation toward the first PrefixLen calls,
-	// and PreferCall (an index inside that prefix) most of all.
-	// Zero PrefixLen keeps the stock complexity-weighted choice.
-	PrefixLen  int
-	PreferCall int
-	// SkipResourceArgs drops resource (fd and similar) arguments from argument
-	// mutation, so that the effort goes into the data arguments instead.
+	// TargetCall is the call that reaches the target code, CompanionCall
+	// produces a resource that TargetCall consumes. They get a dedicated share
+	// of the argument mutation budget and are protected from structural
+	// mutations, since losing either of them turns the program into an
+	// ordinary one. Pointer identity is used rather than an index, because
+	// insert/remove/splice shift indices during one mutation.
+	// Nil means the program has no such role.
+	TargetCall    *Call
+	CompanionCall *Call
+	// SkipResourceArgs drops resource (fd and similar) arguments of TargetCall
+	// from argument mutation, so that the link to whatever produced them
+	// survives. Other calls, including CompanionCall, are mutated as usual.
 	SkipResourceArgs bool
 }
 
@@ -100,7 +105,13 @@ func (p *Prog) MutateWithOpts(rs rand.Source, ncalls int, ct *ChoiceTable, noMut
 		}
 		val -= opts.MutateArgWeight
 		if val < 0 {
-			ok = ctx.mutateArg()
+			if opts.TargetCall != nil && r.nOutOf(2, 3) {
+				// Devote two thirds of the argument budget to the pair, the
+				// rest goes to the plumbing that sets it up.
+				ok = ctx.mutateArg(ctx.pickPairCall())
+			} else {
+				ok = ctx.mutateArg(-1)
+			}
 			continue
 		}
 		ok = ctx.removeCall()
@@ -140,8 +151,20 @@ func (ctx *mutator) splice() bool {
 	}
 	idx := r.Intn(len(p.Calls))
 	p.Calls = append(p.Calls[:idx], append(p0c.Calls, p.Calls[idx:]...)...)
-	for i := len(p.Calls) - 1; i >= ctx.ncalls; i-- {
-		p.RemoveCall(i)
+	// Trim the tail, but never drop the pair. The target call tends to be the
+	// last one, so a naive tail trim removes exactly what matters.
+	for len(p.Calls) > ctx.ncalls {
+		drop := -1
+		for i := len(p.Calls) - 1; i >= 0; i-- {
+			if !ctx.isPair(p.Calls[i]) {
+				drop = i
+				break
+			}
+		}
+		if drop < 0 {
+			break
+		}
+		p.RemoveCall(drop)
 	}
 	return true
 }
@@ -154,7 +177,22 @@ func (ctx *mutator) squashAny() bool {
 	if len(complexPtrs) == 0 {
 		return false
 	}
-	ptr := complexPtrs[r.Intn(len(complexPtrs))]
+	// Squashing a pointer of a pair call throws away the argument structure
+	// that reaches the target, so skip those. Pointers that are already ANY
+	// are kept: only their blobs get mutated, which is what we want.
+	var usable []complexPtr
+	for _, ptr := range complexPtrs {
+		if ctx.isPair(ptr.call) && !p.Target.isAnyPtr(ptr.arg.Type()) {
+			continue
+		}
+		usable = append(usable, ptr)
+	}
+	if len(usable) == 0 {
+		// Squashing the pair is worse than not squashing at all: the program
+		// would keep executing but stop carrying the structure of the target.
+		return false
+	}
+	ptr := usable[r.Intn(len(usable))]
 	if ctx.noMutate[ptr.call.Meta.ID] {
 		return false
 	}
@@ -204,6 +242,14 @@ func (ctx *mutator) insertCall() bool {
 		return false
 	}
 	idx := r.biasedRand(len(p.Calls)+1, 5)
+	// Prefer inserting before the target: a call placed after it can only add
+	// dead code, while one before it may become part of its setup. generateCall
+	// biases towards whatever precedes the insertion point, so clamping the
+	// index also steers the choice table towards calls that co-occur with the
+	// target.
+	if t := slices.Index(p.Calls, ctx.opts.TargetCall); t >= 0 && idx > t {
+		idx = t
+	}
 	var c *Call
 	if idx < len(p.Calls) {
 		c = p.Calls[idx]
@@ -212,9 +258,17 @@ func (ctx *mutator) insertCall() bool {
 	calls := r.generateCall(s, p, idx)
 	p.insertBefore(c, calls)
 	for len(p.Calls) > ctx.ncalls {
+		if ctx.isPair(p.Calls[idx]) {
+			break
+		}
 		p.RemoveCall(idx)
 	}
 	return true
+}
+
+// isPair reports whether c plays the target or the companion role.
+func (ctx *mutator) isPair(c *Call) bool {
+	return c != nil && (c == ctx.opts.TargetCall || c == ctx.opts.CompanionCall)
 }
 
 // Removes a random call from program.
@@ -223,21 +277,46 @@ func (ctx *mutator) removeCall() bool {
 	if len(p.Calls) == 0 {
 		return false
 	}
-	idx := r.Intn(len(p.Calls))
-	p.RemoveCall(idx)
-	return true
+	// Structural mutations must not drop the pair, otherwise the program
+	// silently stops being directed. Give up after a few tries rather than
+	// scanning the whole program.
+	for range 4 {
+		idx := r.Intn(len(p.Calls))
+		if ctx.isPair(p.Calls[idx]) {
+			continue
+		}
+		p.RemoveCall(idx)
+		return true
+	}
+	return false
 }
 
-// Mutate an argument of a random call.
-func (ctx *mutator) mutateArg() bool {
+// pickPairCall returns the index of the pair call to mutate, preferring the
+// companion half the time. A -1 result means the pair is gone and the caller
+// should fall back to the generic selection.
+func (ctx *mutator) pickPairCall() int {
+	p, r := ctx.p, ctx.r
+	if ctx.opts.CompanionCall != nil && r.oneOf(2) {
+		if idx := slices.Index(p.Calls, ctx.opts.CompanionCall); idx >= 0 {
+			return idx
+		}
+	}
+	return slices.Index(p.Calls, ctx.opts.TargetCall)
+}
+
+// Mutate an argument of a call. A negative idx selects the call with the
+// generic complexity-weighted choice.
+func (ctx *mutator) mutateArg(idx int) bool {
 	p, r := ctx.p, ctx.r
 	if len(p.Calls) == 0 {
 		return false
 	}
 
-	idx := chooseCall(p, r, ctx.opts)
 	if idx < 0 {
-		return false
+		idx = chooseCall(p, r, ctx.opts)
+		if idx < 0 {
+			return false
+		}
 	}
 	c := p.Calls[idx]
 	if c.Meta.Attrs.KFuzzTest {
@@ -254,9 +333,11 @@ func (ctx *mutator) mutateArg() bool {
 	for stop, ok := false, false; !stop; stop = ok && r.oneOf(ctx.opts.MutateArgCount) {
 		ok = true
 		ma := &mutationArgs{
-			target:          p.Target,
-			ignoreLengths:   c.Meta.Attrs.KFuzzTest,
-			ignoreResources: ctx.opts.SkipResourceArgs,
+			target:        p.Target,
+			ignoreLengths: c.Meta.Attrs.KFuzzTest,
+			// Only the target call keeps its resource arguments: mutating them
+			// re-binds it to another producer and loses the pair.
+			ignoreResources: ctx.opts.SkipResourceArgs && c == ctx.opts.TargetCall,
 		}
 		ForeachArg(c, ma.collectArg)
 		if len(ma.args) == 0 {
@@ -274,8 +355,15 @@ func (ctx *mutator) mutateArg() bool {
 		p.insertBefore(c, calls)
 		idx += len(calls)
 		for len(p.Calls) > ctx.ncalls {
+			drop := idx - 1
+			for drop >= 0 && ctx.isPair(p.Calls[drop]) {
+				drop--
+			}
+			if drop < 0 {
+				break
+			}
+			p.RemoveCall(drop)
 			idx--
-			p.RemoveCall(idx)
 		}
 		if idx < 0 || idx >= len(p.Calls) || p.Calls[idx] != c {
 			panic(fmt.Sprintf("wrong call index: idx=%v calls=%v p.Calls=%v ncalls=%v",
@@ -289,22 +377,10 @@ func (ctx *mutator) mutateArg() bool {
 }
 
 // Select a call based on the complexity of the arguments.
+// The pair calls are de-prioritized here: they are mutated by the dedicated
+// dispatch branch instead, and giving them the bulk of the generic selection
+// would starve the calls that set them up.
 func chooseCall(p *Prog, r *randGen, opts MutateOpts) int {
-	if opts.PrefixLen > 0 && len(p.Calls) > 0 {
-		n := min(opts.PrefixLen, len(p.Calls))
-		// PreferCall < 0 marks an Extra template: no call owns the coverage,
-		// so argument mutation stays inside the template and picks uniformly.
-		if opts.PreferCall < 0 {
-			return r.Intn(n)
-		}
-		roll := r.Intn(10)
-		if roll < 7 && opts.PreferCall < len(p.Calls) {
-			return opts.PreferCall
-		}
-		if roll < 9 {
-			return r.Intn(n)
-		}
-	}
 	var prioSum float64
 	var callPriorities []float64
 	for _, c := range p.Calls {
@@ -314,6 +390,9 @@ func chooseCall(p *Prog, r *randGen, opts MutateOpts) int {
 			totalPrio += prio
 			ctx.Stop = stopRecursion
 		})
+		if c == opts.TargetCall || c == opts.CompanionCall {
+			totalPrio *= 0.2
+		}
 		prioSum += totalPrio
 		callPriorities = append(callPriorities, prioSum)
 	}
@@ -348,13 +427,12 @@ func (p *Prog) MutateCallArgOpts(rs rand.Source, call int, ct *ChoiceTable, trie
 		ct:     ct,
 		opts: MutateOpts{
 			MutateArgCount:   argCount,
-			PreferCall:       call,
-			PrefixLen:        len(p.Calls),
+			TargetCall:       p.Calls[call],
 			SkipResourceArgs: opts.SkipResourceArgs,
 		},
 	}
 	for range tries {
-		if !ctx.mutateArg() {
+		if !ctx.mutateArg(call) {
 			break
 		}
 	}

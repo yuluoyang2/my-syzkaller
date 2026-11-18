@@ -52,28 +52,11 @@ func TestChooseProgram(t *testing.T) {
 func TestFocusAreas(t *testing.T) {
 	target := getTarget(t, targets.TestOS, targets.TestArch64)
 	corpus := NewFocusedCorpus(context.Background(), nil, []FocusArea{
-		{
-			CoverPCs: map[uint64]struct{}{
-				0: {},
-				1: {},
-			},
-			Weight: 10,
-		},
-		{
-			CoverPCs: map[uint64]struct{}{
-				2: {},
-				3: {},
-			},
-			Weight: 30,
-		},
-		{
-			// An empty CoverPCs filter matches the whole corpus.
-			Weight: 60,
-		},
+		{CoverPCs: map[uint64]struct{}{0: {}, 1: {}}, Weight: 10},
+		{CoverPCs: map[uint64]struct{}{2: {}, 3: {}}, Weight: 30},
+		{Weight: 60},
 	})
-
 	rs := rand.NewSource(0)
-
 	fillGroup := func(from, to, count int) map[*prog.Prog]bool {
 		ret := map[*prog.Prog]bool{}
 		for i := range count {
@@ -85,19 +68,16 @@ func TestFocusAreas(t *testing.T) {
 		}
 		return ret
 	}
-
 	first := fillGroup(0, 1, 10)
 	second := fillGroup(2, 3, 10)
 	third := fillGroup(4, 5, 10)
-
 	rnd := rand.New(rs)
 	different := map[*prog.Prog]bool{}
 	firstCount, secondCount, thirdCount := 0, 0, 0
-	const TOTAL = 10000
-	for range TOTAL {
+	const total = 10000
+	for range total {
 		p := corpus.ChooseProgram(rnd)
 		different[p] = true
-
 		if first[p] {
 			firstCount++
 		} else if second[p] {
@@ -106,112 +86,35 @@ func TestFocusAreas(t *testing.T) {
 			thirdCount++
 		}
 	}
-
 	assert.Greater(t, len(different), 25)
-	// The third area (weight 60%) covers all 3 groups equally (20% each).
-	assert.InDelta(t, firstCount, TOTAL*0.3, TOTAL/25)
-	assert.InDelta(t, secondCount, TOTAL*0.5, TOTAL/25)
-	assert.InDelta(t, thirdCount, TOTAL*0.2, TOTAL/25)
+	assert.InDelta(t, firstCount, total*0.3, total/25)
+	assert.InDelta(t, secondCount, total*0.5, total/25)
+	assert.InDelta(t, thirdCount, total*0.2, total/25)
 }
 
 func TestFocusAreaInAreaWeighting(t *testing.T) {
 	target := getTarget(t, targets.TestOS, targets.TestArch64)
 	rs := rand.NewSource(0)
 	rnd := rand.New(rs)
-
 	corpus := NewFocusedCorpus(context.Background(), nil, []FocusArea{
-		{
-			Name:     "patch",
-			CoverPCs: map[uint64]struct{}{10: {}, 11: {}},
-			Weight:   1.0,
-		},
+		{Name: "patch", CoverPCs: map[uint64]struct{}{10: {}, 11: {}}, Weight: 1},
 	})
-
-	// inp1 has 100 global signal entries, but only 1 PC in the focus area.
 	inp1 := generateRangedInput(target, rs, 1, 100)
 	inp1.Cover = []uint64{10}
-
-	// inp2 has only 2 global signal entries, but both of its PCs are in the focus area.
 	inp2 := generateRangedInput(target, rs, 101, 102)
 	inp2.Cover = []uint64{10, 11}
-
 	corpus.Save(inp1)
 	corpus.Save(inp2)
-
 	verifySampling := func(stage string) {
 		counts := make(map[*prog.Prog]int)
 		const iters = 10000
 		for range iters {
 			counts[corpus.ChooseProgram(rnd)]++
 		}
-		// inp2 has 2 focus PCs, inp1 has 1 focus PC.
-		// inp2 should be chosen ~2/3 (66.7%) of the time, inp1 ~1/3 (33.3%).
-		// Under the old bug (len(signal)), inp1 would be chosen ~98% of the time.
 		assert.InDelta(t, 2.0/3.0, float64(counts[inp2.Prog])/iters, 0.05, stage)
 		assert.InDelta(t, 1.0/3.0, float64(counts[inp1.Prog])/iters, 0.05, stage)
 	}
-
 	verifySampling("before minimization")
 	corpus.Minimize(true)
 	verifySampling("after minimization")
-}
-
-func TestFocusTiers(t *testing.T) {
-	target := getTarget(t, targets.TestOS, targets.TestArch64)
-	rs := rand.NewSource(0)
-	corpus := NewFocusedCorpus(context.Background(), nil, []FocusArea{
-		{Name: "A", CoverPCs: map[uint64]struct{}{10: {}, 11: {}}, Weight: 16},
-		{Name: "B", CoverPCs: map[uint64]struct{}{20: {}}, Weight: 8},
-		{Name: "C", CoverPCs: map[uint64]struct{}{30: {}}, Weight: 4},
-		{Name: "D", CoverPCs: map[uint64]struct{}{10: {}, 11: {}, 40: {}}, Weight: 2},
-		{Name: "target", CoverPCs: map[uint64]struct{}{50: {}}, Weight: 16},
-		{Name: "rest", Weight: 1},
-	})
-
-	targetInp := generateRangedInput(target, rs, 1, 2)
-	targetInp.Cover = []uint64{10, 11}
-	hopInp := generateRangedInput(target, rs, 3, 4)
-	hopInp.Cover = []uint64{20}
-	corpus.Save(targetInp)
-	corpus.Save(hopInp)
-
-	tiers := corpus.FocusTiers()
-	assert.Len(t, tiers, 4)
-	assert.Equal(t, []string{"A", "B", "C", "D"}, []string{
-		tiers[0].Class, tiers[1].Class, tiers[2].Class, tiers[3].Class,
-	})
-	assert.Equal(t, "A", tiers[0].Name)
-	assert.Len(t, tiers[0].Seeds, 1)
-	assert.Equal(t, 2, tiers[0].Seeds[0].Hits)
-	assert.Equal(t, targetInp.Prog.String(), tiers[0].Seeds[0].Short)
-	assert.Len(t, tiers[1].Seeds, 1)
-	assert.Empty(t, tiers[2].Seeds)
-	assert.Len(t, tiers[3].Seeds, 1)
-	assert.Equal(t, 2, tiers[3].Seeds[0].Hits)
-}
-
-func TestFocusClassNames(t *testing.T) {
-	for _, class := range []string{"A", "B", "C", "D"} {
-		assert.Equal(t, class, focusClass(class))
-	}
-	for _, unsupported := range []string{"target", "hop1", "hop2", "subsystem", "rest", "a"} {
-		assert.Empty(t, focusClass(unsupported))
-	}
-}
-
-func TestBestFocus(t *testing.T) {
-	corpus := NewFocusedCorpus(context.Background(), nil, []FocusArea{
-		{Name: "A", CoverPCs: map[uint64]struct{}{10: {}, 11: {}}, Weight: 16},
-		{Name: "B", CoverPCs: map[uint64]struct{}{20: {}}, Weight: 8},
-		{Name: "D", CoverPCs: map[uint64]struct{}{10: {}, 11: {}, 40: {}}, Weight: 2},
-	})
-	class, pcs := corpus.BestFocus([]uint64{10, 11, 40})
-	assert.Equal(t, "A", class)
-	assert.ElementsMatch(t, []uint64{10, 11}, pcs)
-	class, pcs = corpus.BestFocus([]uint64{20})
-	assert.Equal(t, "B", class)
-	assert.Equal(t, []uint64{20}, pcs)
-	class, pcs = corpus.BestFocus([]uint64{99})
-	assert.Empty(t, class)
-	assert.Empty(t, pcs)
 }

@@ -43,6 +43,11 @@ type randGen struct {
 	genKFuzzTest          bool
 	recDepth              map[Type]int
 	genDefaultResource    bool
+	// bindCalls holds calls whose produced resources should be preferred for
+	// resource arguments. GenerateCallPair sets it while it generates the
+	// target call, so the target consumes what the related call created instead
+	// of an unrelated resource made by the random fill.
+	bindCalls []*Call
 }
 
 func newRand(target *Target, rs rand.Source) *randGen {
@@ -797,6 +802,9 @@ func (a *ResourceType) generate(r *randGen, s *state, dir Dir) (arg Arg, calls [
 		defer func() { r.inGenerateResource = false }()
 		canRecurse = true
 	}
+	if arg := r.boundResource(a, dir); arg != nil {
+		return arg, nil
+	}
 	if (canRecurse && r.nOutOf(8, 10) ||
 		!canRecurse && r.nOutOf(19, 20)) && !r.genDefaultResource {
 		arg = r.existingResource(s, a, dir)
@@ -987,6 +995,29 @@ func (a *LenType) generate(r *randGen, s *state, dir Dir) (arg Arg, calls []*Cal
 func (a *CsumType) generate(r *randGen, s *state, dir Dir) (arg Arg, calls []*Call) {
 	// Filled at runtime by executor.
 	return MakeConstArg(a, dir, 0), nil
+}
+
+// boundResource returns a ResultArg referring to a resource produced by one of
+// r.bindCalls, or nil if none of them produces a compatible resource.
+func (r *randGen) boundResource(res *ResourceType, dir Dir) Arg {
+	if len(r.bindCalls) == 0 {
+		return nil
+	}
+	for _, c := range r.bindCalls {
+		for _, produced := range producedResources(c) {
+			src, ok := produced.Type().(*ResourceType)
+			if !ok {
+				continue
+			}
+			// Precise matching: the target call must consume exactly what the
+			// related call produced, not a less specialized resource.
+			if !isCompatibleResourceImpl(res.Desc.Kind, src.Desc.Kind, true) {
+				continue
+			}
+			return MakeResultArg(res, dir, produced, 0)
+		}
+	}
+	return nil
 }
 
 func (r *randGen) existingResource(s *state, res *ResourceType, dir Dir) Arg {

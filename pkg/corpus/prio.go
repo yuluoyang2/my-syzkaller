@@ -42,6 +42,9 @@ func (corpus *Corpus) ChooseProgram(r *rand.Rand) *prog.Prog {
 	if len(corpus.progsMap) == 0 {
 		return nil
 	}
+	if corpus.directed != nil {
+		return corpus.progsMap[corpus.directed.sampler.choose(r)].Prog
+	}
 	// We could have used an approach similar to chooseProgram(), but for small number
 	// of focus areas that is an overkill.
 	var randArea *focusAreaState
